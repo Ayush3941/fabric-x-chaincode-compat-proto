@@ -1,0 +1,39 @@
+# Fabric-X generated runtime/state
+runtime/
+storage/
+
+# Generated crypto, configs, and transaction artifacts
+artifacts/
+*.block
+*.tx
+*.pb
+*.pb.bin
+
+# Local binaries/tools built or copied for the demo
+bin/
+*.test
+
+# Local dependency checkouts/builds
+third_party/
+
+# Go build/test caches and temporary files
+.gocache/
+.tmp/
+tmp/
+coverage.out
+*.coverprofile
+*.prof
+
+# Logs and local process output
+*.log
+*.pid
+*.out
+nohup.out
+
+# Local environment and editor/OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
