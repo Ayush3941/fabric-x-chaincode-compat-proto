@@ -136,6 +136,26 @@ cd /home/kali/Desktop/LFX/Project
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
+## Run Tests
+
+Run tests against source packages, not `go test ./...` from the Project root
+after the network has started. The running network creates Docker-owned
+directories under `storage/`, and the Go tool recursively walks those
+directories before applying package filtering.
+
+Use:
+
+```bash
+cd /home/kali/Desktop/LFX/Project
+go test ./cmd/...
+
+cd /home/kali/Desktop/LFX/Project/chaincode_helper
+go test ./...
+
+cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+go test ./...
+```
+
 ## Run The V1 Services
 
 Use three terminals.
@@ -354,13 +374,3 @@ Included in V1:
 - one external Go chaincode service
 - Query Service reads
 - Notification Service finality
-
-Deferred:
-
-- multi-organization helper coordination
-- helper discovery/gossip
-- state-based endorsement policy compatibility
-- private data
-- range/rich/history queries
-- cross-chaincode invocation
-- preserving the original Fabric event name in Fabric-X metadata
