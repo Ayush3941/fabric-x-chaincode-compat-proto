@@ -1,0 +1,89 @@
+#
+# Minimal real Fabric-X network for compatibility smoke tests.
+#
+# This keeps the real post-ordering path:
+# SDK client -> Arma routers -> Arma assemblers -> committer sidecar
+# -> coordinator -> verifier -> validator-committer -> DB/query service.
+#
+---
+services:
+  arma:
+    image: ${ORDERER_IMAGE:-docker.io/hyperledger/arma-4p1s:latest}
+    container_name: project-arma
+    entrypoint: ["/run_all.sh"]
+    volumes:
+      - ${ARTIFACTS_DIR:?ARTIFACTS_DIR is required}:/tmp/arma-all-in-one
+      - ${STORAGE_DIR:?STORAGE_DIR is required}:/storage
+    ports:
+      - "6022-6025:6022-6025"
+      - "6122-6125:6122-6125"
+      - "6222-6225:6222-6225"
+      - "6322-6325:6322-6325"
+      - "8022-8025:8022-8025"
+      - "8122-8125:8122-8125"
+      - "8222-8225:8222-8225"
+      - "8322-8325:8322-8325"
+    networks:
+      - project-fx
+
+  committer:
+    image: ${COMMITTER_IMAGE:-docker.io/hyperledger/committer-test-node:latest}
+    container_name: project-committer
+    command: ["run", "db", "init-db", "committer"]
+    volumes:
+      - ${ARTIFACTS_DIR:?ARTIFACTS_DIR is required}:/root/artifacts
+      - ./committerconfig:/root/config
+      - ./runtime/committer:/root/sc
+    ports:
+      - "4001:4001"
+      - "7001:7001"
+      - "2114:2114"
+      - "2115:2115"
+      - "2116:2116"
+      - "2117:2117"
+      - "2119:2119"
+    depends_on:
+      - arma
+    networks:
+      - project-fx
+
+  prometheus:
+    image: prom/prometheus:v3.3.1
+    container_name: project-prometheus
+    profiles: ["monitoring"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${ARTIFACTS_DIR:?ARTIFACTS_DIR is required}:/tls:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=1h"
+      - "--web.enable-remote-write-receiver"
+    ports:
+      - "9090:9090"
+    networks:
+      - project-fx
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: project-grafana
+    profiles: ["monitoring"]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/committer.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/committer.json:/var/lib/grafana/dashboards/committer.json:ro
+      - ./grafana/orderer.json:/var/lib/grafana/dashboards/orderer.json:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - project-fx
+
+networks:
+  project-fx:
+    driver: bridge

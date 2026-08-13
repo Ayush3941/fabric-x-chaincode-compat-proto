@@ -1,0 +1,48 @@
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+channel-id: channelqc4
+namespace: "0"
+protocol: fabric-x
+
+server:
+  endpoint:
+    host: localhost
+    port: 9001
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
+      - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
+
+identity:
+  msp-id: org-0
+  msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/msp
+
+query-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 7001
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
+    server-name: 127.0.0.1
+
+chaincode-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 9999
+  tls:
+    mode: none
+
+logging:
+  logSpec: info:grpc=error
+  format: >-
+    %{color}%{time:2006-01-02 15:04:05.000 MST} [%{module}] %{shortfunc} -> %{level:.4s}%{color:reset} %{message}

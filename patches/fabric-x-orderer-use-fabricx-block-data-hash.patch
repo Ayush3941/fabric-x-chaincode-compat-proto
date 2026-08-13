@@ -1,0 +1,59 @@
+diff --git a/node/consensus/consensus_builder.go b/node/consensus/consensus_builder.go
+--- a/node/consensus/consensus_builder.go
++++ b/node/consensus/consensus_builder.go
+@@ -41,7 +41,7 @@ import (
+ 	"github.com/hyperledger/fabric-x-orderer/node/crypto"
+ 	"github.com/hyperledger/fabric-x-orderer/node/delivery"
+ 	"github.com/hyperledger/fabric-x-orderer/node/ledger"
+ 	node_utils "github.com/hyperledger/fabric-x-orderer/node/utils"
+-	"github.com/hyperledger/fabric/protoutil"
++	"github.com/hyperledger/fabric-x-common/protoutil"
+ 	"google.golang.org/protobuf/proto"
+ )
+ 
+diff --git a/vendor/github.com/hyperledger/fabric-x-common/protoutil/blockutils.go b/vendor/github.com/hyperledger/fabric-x-common/protoutil/blockutils.go
+--- a/vendor/github.com/hyperledger/fabric-x-common/protoutil/blockutils.go
++++ b/vendor/github.com/hyperledger/fabric-x-common/protoutil/blockutils.go
+@@ -7,11 +7,12 @@ SPDX-License-Identifier: Apache-2.0
+ package protoutil
+ 
+ import (
+ 	"bytes"
+ 	"crypto/sha256"
+ 	"encoding/asn1"
+ 	"encoding/base64"
++	"encoding/binary"
+ 	"fmt"
+ 	"math/big"
+ 
+ 	"github.com/cockroachdb/errors"
+@@ -75,8 +75,14 @@ func BlockDataHash(b *cb.BlockData) ([]byte, error) {
+ }
+ 
+ func ComputeBlockDataHash(b *cb.BlockData) []byte {
+-	sum := sha256.Sum256(bytes.Join(b.Data, nil))
+-	return sum[:]
++	sizeBuff := make([]byte, 4)
++	h := sha256.New()
++	for _, d := range b.Data {
++		binary.BigEndian.PutUint32(sizeBuff, uint32(len(d)))
++		h.Write(sizeBuff) //nolint:revive // hash.Write never returns an error
++		h.Write(d)        //nolint:revive // hash.Write never returns an error
++	}
++	return h.Sum(nil)
+ }
+ 
+ // GetChannelIDFromBlockBytes returns channel ID given byte array which represents
+diff --git a/node/consensus/state/message_to_sign.go b/node/consensus/state/message_to_sign.go
+--- a/node/consensus/state/message_to_sign.go
++++ b/node/consensus/state/message_to_sign.go
+@@ -23,8 +23,7 @@ type MessageToSign struct {
+ }
+ 
+ func (m *MessageToSign) AsBytes() []byte {
+-	msg2Sign := concatenateBytes(m.OrdererBlockMetadata, m.IdentifierHeader, m.BlockHeader)
+-	return msg2Sign
++	return m.Marshal()
+ }
+ 
+ func (m *MessageToSign) Unmarshal(bytes []byte) error {

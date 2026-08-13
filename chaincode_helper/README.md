@@ -1,0 +1,153 @@
+# Fabric-X Chaincode Helper
+
+This folder contains the V1 chaincode compatibility helper, coordinator, and
+test client. It is based on the Fabric-X custom endorser shape, but the executor
+now talks to an external Fabric chaincode-as-a-service process through the real
+Fabric shim message protocol.
+
+The helper is intentionally stateless:
+
+- it does not maintain a Fabric peer ledger
+- it does not run a local world-state database
+- it reads committed state through Fabric-X Query Service
+- it captures reads, writes, deletes, responses, and event payloads per
+  invocation
+- it returns Fabric-X-format endorsements through `fabric-x-sdk`
+
+Current V1 flow:
+
+```text
+client CLI
+-> coordinator HTTP API
+-> helper peer.Endorser.ProcessProposal service
+-> pkg/api ExecutionContext
+-> pkg/shim CCAAS connector and message handler
+-> external chaincode Invoke
+-> GET_STATE routed to Fabric-X Query Service
+-> PUT_STATE / DEL_STATE captured in memory
+-> Fabric-X endorsement response
+-> coordinator submits to orderer and waits for Notification Service finality
+```
+
+## Layout
+
+```text
+cmd/helper/        helper service exposing peer.Endorser.ProcessProposal
+cmd/coordinator/   client-facing coordinator and Fabric-X submit/finality path
+cmd/client/        small CLI for query/invoke through the coordinator
+pkg/api/           ProcessProposal service, ExecutionContext, Query adapter
+pkg/config/        YAML config structures
+pkg/coordinator/   HTTP API, helper call, submitter, notification wait
+pkg/shim/          CCAAS connector and Fabric ChaincodeMessage handler
+sampleconfig/      configs wired to ../artifacts from the Project network
+```
+
+## Build
+
+```bash
+cd /home/kali/Desktop/LFX/Project/chaincode_helper
+go build -o bin/client ./cmd/client
+go build -o bin/helper ./cmd/helper
+go build -o bin/coordinator ./cmd/coordinator
+```
+
+## Run
+
+Start the Project Fabric-X network and namespace first from the parent folder:
+
+```bash
+cd /home/kali/Desktop/LFX/Project
+./scripts/start-network.sh
+./scripts/create-namespace.sh
+```
+
+Start the external chaincode service:
+
+```bash
+cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+go build -o bin/sample-chaincode ./cmd/server
+./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
+```
+
+Start the helper:
+
+```bash
+cd /home/kali/Desktop/LFX/Project/chaincode_helper
+./bin/helper -c sampleconfig/helper1.yaml
+```
+
+Start the coordinator:
+
+```bash
+cd /home/kali/Desktop/LFX/Project/chaincode_helper
+./bin/coordinator -c sampleconfig/coordinator1.yaml
+```
+
+Submit a real V1 invoke:
+
+```bash
+cd /home/kali/Desktop/LFX/Project/chaincode_helper
+
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client-coordinator.yaml \
+  '{"Function":"put","Args":["asset1","old-value"]}'
+
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client-coordinator.yaml \
+  '{"Function":"put","Args":["asset-to-delete","delete-me"]}'
+
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client-coordinator.yaml \
+  '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
+```
+
+The final response should include `commit_status: "COMMITTED"`.
+
+## Important Files
+
+- `pkg/api/service.go`
+  - registers `peer.EndorserServer`
+  - parses signed proposals
+  - owns `ExecutionContext`
+  - reads state through Query Service
+  - builds Fabric-X endorsements
+
+- `cmd/helper/executor.go`
+  - adapts `endorsement.Invocation` to `pkg/shim.Invocation`
+  - converts the shim bridge result into `endorsement.ExecutionResult`
+
+- `pkg/shim/connector.go`
+  - opens the `peer.Chaincode/Connect` stream to the external chaincode service
+  - handles the initial `REGISTER` / `REGISTERED` / `READY` handshake
+  - defines the state interface satisfied by `ExecutionContext`
+
+- `pkg/shim/handler.go`
+  - sends `TRANSACTION`
+  - routes `GET_STATE`, `PUT_STATE`, and `DEL_STATE`
+  - returns the chaincode `COMPLETED` response and event payload
+
+- `pkg/coordinator/service.go`
+  - accepts lightweight JSON query/invoke requests
+  - calls the helper
+  - submits Fabric-X transactions
+  - waits on Notification Service and returns finality
+
+## V1 Scope
+
+Implemented for the sample chaincode:
+
+- `GetState`, `PutState`, `DelState`
+- read-your-writes overlay
+- `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
+- `GetTxID`, `GetChannelID`
+- `CreateCompositeKey`, `SplitCompositeKey`
+- `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
+- event payload propagation through the current SDK `Event []byte` path
+
+Deferred:
+
+- multi-organization helper coordination
+- range/rich/history queries
+- private data
+- cross-chaincode invocation
+- preserving the original Fabric event name instead of SDK default `log`

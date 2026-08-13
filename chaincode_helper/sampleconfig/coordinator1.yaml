@@ -1,0 +1,56 @@
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+channel-id: channelqc4
+namespace: "0"
+protocol: fabric-x
+wait-after-submit: 0s
+finality-timeout: 20s
+
+server:
+  endpoint:
+    host: 127.0.0.1
+    port: 9101
+  tls:
+    mode: none
+
+identity:
+  msp-id: org-0
+  msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/msp
+
+helpers:
+  - endpoint:
+      host: localhost
+      port: 9001
+    tls:
+      mode: mtls
+      cert-path: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/tls/client.crt
+      key-path: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/tls/client.key
+      ca-cert-paths:
+        - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
+
+orderer:
+  endpoint:
+    host: 127.0.0.1
+    port: 6022
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/ordererOrganizations/orderer-org-1/msp/tlscacerts/tlsca.orderer-org-1-cert.pem
+    server-name: 127.0.0.1
+
+notification-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 4001
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
+    server-name: 127.0.0.1

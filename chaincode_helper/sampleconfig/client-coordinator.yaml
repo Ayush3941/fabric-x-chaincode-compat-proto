@@ -1,0 +1,15 @@
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+channel-id: channelqc4
+namespace: "0"
+protocol: fabric-x
+
+coordinator:
+  endpoint:
+    host: 127.0.0.1
+    port: 9101
+  tls:
+    mode: none
