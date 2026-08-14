@@ -41,7 +41,9 @@ queries:
 notifications:
   address: 127.0.0.1:4001
   connectionTimeout: 15s
-  waitingTimeout: 30s
+  # A fresh committer may still be initializing database tables when the first
+  # namespace transaction is submitted.
+  waitingTimeout: 120s
   tls:
     rootCerts:
       - ARTIFACTS_DIR/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem

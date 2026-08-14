@@ -4,8 +4,8 @@ go 1.26.5
 
 require (
 	github.com/hyperledger/fabric-protos-go-apiv2 v0.3.7
-	github.com/hyperledger/fabric-x-common v0.2.8
-	github.com/hyperledger/fabric-x-sdk v0.0.0
+	github.com/hyperledger/fabric-x-common v0.2.9-0.20260716124624-c6defc2b11b4
+	github.com/hyperledger/fabric-x-sdk v0.0.0-20260618080057-dddd57eee118
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -28,13 +28,9 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260630182238-925bb5da69e7 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/hyperledger/fabric-x-sdk => ../fabric-x-sdk
-
-replace github.com/hyperledger/fabric-x-common => ../fabric-x-common

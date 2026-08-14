@@ -79,24 +79,29 @@ nc
 openssl
 ```
 
-The default build path uses local checkouts next to this project:
+By default, `scripts/build-images.sh` clones the required Fabric-X source
+repositories into `third_party/.build` and builds from pinned refs.
+
+If you are actively developing against local Fabric-X checkouts, place them next
+to this repository:
 
 ```text
-/home/kali/Desktop/LFX/fabric-x
-/home/kali/Desktop/LFX/fabric-x-orderer
-/home/kali/Desktop/LFX/fabric-x-committer
+../fabric-x
+../fabric-x-orderer
+../fabric-x-committer
 ```
 
-If you want to build from upstream refs instead, set `USE_LOCAL_REPOS=0` when
-running `scripts/build-images.sh`.
+Then build with:
+
+```bash
+USE_LOCAL_REPOS=1 ./scripts/build-images.sh
+```
 
 ## Fresh Setup
 
-From the Project root:
+From the repository root:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project
-
 ./scripts/build-images.sh
 ./scripts/generate-artifacts.sh
 ./scripts/start-network.sh
@@ -124,15 +129,15 @@ That submits a hard-coded Fabric-X RW set through `cmd/rws-smoke`.
 ## Build V1 Prototype Binaries
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 go build -o bin/client ./cmd/client
 go build -o bin/helper ./cmd/helper
 go build -o bin/coordinator ./cmd/coordinator
 
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
 
-cd /home/kali/Desktop/LFX/Project
+cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
@@ -146,38 +151,39 @@ directories before applying package filtering.
 Use:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project
 go test ./cmd/...
 
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 go test ./...
 
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd ../sample_external_chaincode
 go test ./...
+
+cd ..
 ```
 
 ## Run The V1 Services
 
-Use three terminals.
+Use three terminals. Start each terminal from the repository root.
 
 Terminal 1, external chaincode service:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
 Terminal 2, helper:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/helper -c sampleconfig/helper1.yaml
 ```
 
 Terminal 3, coordinator:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/coordinator -c sampleconfig/coordinator1.yaml
 ```
 
@@ -212,7 +218,7 @@ Fabric-X transaction and waits for Notification Service finality.
 Create two committed keys first:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client-coordinator.yaml \
@@ -287,14 +293,13 @@ The second query should print an empty payload because the key was deleted.
 Get current block height and dump recent blocks:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project
-./bin/block-dump -artifacts ./artifacts -from 0
+FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -from 0
 ```
 
 Inspect one transaction by ID:
 
 ```bash
-./bin/block-dump -artifacts ./artifacts -txid <tx_id>
+FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
 For a successful `compatv1` transaction, block output should show:
@@ -322,29 +327,31 @@ If the Fabric-X network and namespace are already running, only rebuild and
 restart the three V1 processes:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 go build -o bin/client ./cmd/client
 go build -o bin/helper ./cmd/helper
 go build -o bin/coordinator ./cmd/coordinator
 
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
+
+cd ..
 ```
 
 Then restart:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/helper -c sampleconfig/helper1.yaml
 ```
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/coordinator -c sampleconfig/coordinator1.yaml
 ```
 
@@ -353,7 +360,6 @@ cd /home/kali/Desktop/LFX/Project/chaincode_helper
 Stop Fabric-X containers but keep artifacts and ledger state:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project
 ./scripts/stop-network.sh
 ```
 

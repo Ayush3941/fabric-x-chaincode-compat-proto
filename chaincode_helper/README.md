@@ -44,8 +44,10 @@ sampleconfig/      configs wired to ../artifacts from the Project network
 
 ## Build
 
+Commands in this file assume your shell starts from the repository root.
+
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 go build -o bin/client ./cmd/client
 go build -o bin/helper ./cmd/helper
 go build -o bin/coordinator ./cmd/coordinator
@@ -53,10 +55,9 @@ go build -o bin/coordinator ./cmd/coordinator
 
 ## Run
 
-Start the Project Fabric-X network and namespace first from the parent folder:
+Start the Project Fabric-X network and namespace first:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project
 ./scripts/start-network.sh
 ./scripts/create-namespace.sh
 ```
@@ -64,7 +65,7 @@ cd /home/kali/Desktop/LFX/Project
 Start the external chaincode service:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/sample_external_chaincode
+cd sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
@@ -72,21 +73,21 @@ go build -o bin/sample-chaincode ./cmd/server
 Start the helper:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/helper -c sampleconfig/helper1.yaml
 ```
 
 Start the coordinator:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 ./bin/coordinator -c sampleconfig/coordinator1.yaml
 ```
 
 Submit a real V1 invoke:
 
 ```bash
-cd /home/kali/Desktop/LFX/Project/chaincode_helper
+cd chaincode_helper
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client-coordinator.yaml \

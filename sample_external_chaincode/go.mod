@@ -15,7 +15,3 @@ require (
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/hyperledger/fabric-chaincode-go/v2 => ../../fabric-chaincode-go
-
-replace github.com/hyperledger/fabric-protos-go-apiv2 => ../../fabric-protos-go-apiv2
