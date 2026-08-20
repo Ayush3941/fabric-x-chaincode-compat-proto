@@ -110,25 +110,6 @@ Organizations:
         Type: Signature
         Rule: OR('org-0.member')
 
-  - &PeerOrg1MSP
-    Name: peer-org-1
-    SkipAsForeign: false
-    ID: org-1
-    MSPDir: ARTIFACTS_DIR/peerOrganizations/peer-org-1/msp
-    Policies: &PeerOrg1Policies
-      Readers:
-        Type: Signature
-        Rule: OR('org-1.member')
-      Writers:
-        Type: Signature
-        Rule: OR('org-1.member')
-      Admins:
-        Type: Signature
-        Rule: OR('org-1.admin')
-      Endorsement:
-        Type: Signature
-        Rule: OR('org-1.member')
-
 ################################################################################
 #
 #   CAPABILITIES
@@ -287,4 +268,3 @@ Profiles:
       <<: *ApplicationDefaults
       Organizations:
         - *PeerOrg0MSP
-        - *PeerOrg1MSP

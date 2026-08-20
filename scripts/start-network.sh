@@ -20,8 +20,8 @@ wait_for_port 6024 "Arma batcher"
 wait_for_port 4001 "Committer sidecar"
 wait_for_port 7001 "Query service"
 
-MTLS_CERT="${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt"
-MTLS_KEY="${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key"
+MTLS_CERT="${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt"
+MTLS_KEY="${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key"
 
 wait_for_mtls \
   6022 \

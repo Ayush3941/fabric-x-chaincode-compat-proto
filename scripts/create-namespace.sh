@@ -12,13 +12,10 @@ POLICY="${POLICY:-OR('org-0.member')}"
 }
 
 FXCONFIG_ORG0="${ARTIFACTS_DIR}/fxconfig-peer-org-0.yaml"
-FXCONFIG_ORG1="${ARTIFACTS_DIR}/fxconfig-peer-org-1.yaml"
 mkdir -p "${ARTIFACTS_DIR}/fxconfig-tx"
 
 sed "s|ARTIFACTS_DIR|${ARTIFACTS_DIR}|g" \
   "${PROJECT_ROOT}/fxconfig/peer-org-0.yaml" >"${FXCONFIG_ORG0}"
-sed "s|ARTIFACTS_DIR|${ARTIFACTS_DIR}|g" \
-  "${PROJECT_ROOT}/fxconfig/peer-org-1.yaml" >"${FXCONFIG_ORG1}"
 
 echo "Creating namespace ${NAMESPACE} with policy ${POLICY}"
 "${FABRIC_X_BIN}/fxconfig" namespace create "${NAMESPACE}" \
@@ -30,18 +27,9 @@ echo "Creating namespace ${NAMESPACE} with policy ${POLICY}"
   --config="${FXCONFIG_ORG0}" \
   --output="${ARTIFACTS_DIR}/fxconfig-tx/tx_org0.json" </dev/null
 
-"${FABRIC_X_BIN}/fxconfig" tx endorse "${ARTIFACTS_DIR}/fxconfig-tx/tx.json" \
-  --config="${FXCONFIG_ORG1}" \
-  --output="${ARTIFACTS_DIR}/fxconfig-tx/tx_org1.json" </dev/null
-
-"${FABRIC_X_BIN}/fxconfig" tx merge \
-  "${ARTIFACTS_DIR}/fxconfig-tx/tx_org0.json" \
-  "${ARTIFACTS_DIR}/fxconfig-tx/tx_org1.json" \
-  --output="${ARTIFACTS_DIR}/fxconfig-tx/tx_merged.json" </dev/null
-
 set +e
 SUBMIT_OUTPUT="$("${FABRIC_X_BIN}/fxconfig" tx submit --wait \
-  "${ARTIFACTS_DIR}/fxconfig-tx/tx_merged.json" \
+  "${ARTIFACTS_DIR}/fxconfig-tx/tx_org0.json" \
   --config="${FXCONFIG_ORG0}" </dev/null 2>&1)"
 SUBMIT_STATUS=$?
 set -e

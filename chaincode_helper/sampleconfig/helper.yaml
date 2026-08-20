@@ -9,19 +9,18 @@ protocol: fabric-x
 
 server:
   endpoint:
-    host: localhost
-    port: 9002
+    host: 127.0.0.1
+    port: 9001
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/sidecar.peer-org-1/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-1/peers/sidecar.peer-org-1/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
-      - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
 
 identity:
-  msp-id: org-1
-  msp-dir: ../artifacts/peerOrganizations/peer-org-1/users/client@peer-org-1/msp
+  msp-id: org-0
+  msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/msp
 
 query-service:
   endpoint:
@@ -29,9 +28,8 @@ query-service:
     port: 7001
   tls:
     mode: mtls
-    # Project's Query Service currently trusts peer-org-0 client TLS material.
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1

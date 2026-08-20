@@ -272,8 +272,8 @@ func renderBytes(b []byte) string {
 func queryConn(artifacts, address string) (*grpc.ClientConn, error) {
 	tlsCfg, err := (network.TLSConfig{
 		Mode:        network.TLSModeMTLS,
-		CertPath:    filepath.Join(artifacts, "peerOrganizations", "peer-org-0", "peers", "loadgen.peer-org-0", "tls", "server.crt"),
-		KeyPath:     filepath.Join(artifacts, "peerOrganizations", "peer-org-0", "peers", "loadgen.peer-org-0", "tls", "server.key"),
+		CertPath:    filepath.Join(artifacts, "peerOrganizations", "peer-org-0", "peers", "helper.peer-org-0", "tls", "server.crt"),
+		KeyPath:     filepath.Join(artifacts, "peerOrganizations", "peer-org-0", "peers", "helper.peer-org-0", "tls", "server.key"),
 		CACertPaths: []string{filepath.Join(artifacts, "peerOrganizations", "peer-org-0", "msp", "tlscacerts", "tlsca.peer-org-0-cert.pem")},
 		ServerName:  serverName(address),
 	}).LoadClientTLSConfig(serverName(address))

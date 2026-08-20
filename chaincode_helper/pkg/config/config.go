@@ -8,7 +8,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 
@@ -123,11 +122,6 @@ type Endpoint struct {
 
 // Address returns a string representation of the endpoint's address.
 func (e *Endpoint) Address() string {
-	// JoinHostPort defaults to ipv6 for localhost,
-	// which is not always wanted.
-	if e.Host == "localhost" {
-		return fmt.Sprintf("%s:%d", e.Host, e.Port)
-	}
 	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
 }
 

@@ -12,9 +12,13 @@ finality-timeout: 20s
 server:
   endpoint:
     host: 127.0.0.1
-    port: 9101
+    port: 9102
   tls:
-    mode: none
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
 
 identity:
   msp-id: org-0
@@ -22,7 +26,7 @@ identity:
 
 helpers:
   - endpoint:
-      host: localhost
+      host: 127.0.0.1
       port: 9001
     tls:
       mode: mtls
@@ -37,8 +41,8 @@ orderer:
     port: 6022
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/ordererOrganizations/orderer-org-1/msp/tlscacerts/tlsca.orderer-org-1-cert.pem
     server-name: 127.0.0.1
@@ -49,8 +53,8 @@ notification-service:
     port: 4001
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1

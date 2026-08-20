@@ -17,8 +17,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   - job_name: "committer-verifier"
@@ -27,8 +27,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   - job_name: "committer-vc"
@@ -37,8 +37,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   - job_name: "committer-query"
@@ -47,8 +47,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   - job_name: "committer-coordinator"
@@ -57,8 +57,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   # ---------------------------------------------------------------------------
@@ -70,8 +70,8 @@ scrape_configs:
     scheme: https
     tls_config:
       ca_file: /tls/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
-      cert_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-      key_file: /tls/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+      cert_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+      key_file: /tls/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
       insecure_skip_verify: true
 
   # ---------------------------------------------------------------------------

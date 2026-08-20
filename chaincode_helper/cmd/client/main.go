@@ -7,12 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -44,8 +41,7 @@ type Config struct {
 	// Identity is the MSP identity used for signing the proposal and the transaction.
 	Identity *config.IdentityConfig `mapstructure:"identity"`
 
-	// Coordinator is the V1 client-facing coordinator endpoint. When this is
-	// set, query and invoke are sent there as lightweight JSON requests.
+	// Coordinator is the V1 client-facing ProcessProposal endpoint.
 	Coordinator *config.ClientConfig `mapstructure:"coordinator"`
 
 	// Endorsers is the list of ProcessProposal endpoints, one per organization.
@@ -95,13 +91,13 @@ func newQueryCmd() *cobra.Command {
 		Short: "Send a read-only proposal and print the response payload",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, tx, txArgs, err := prepare(cmd, args[0])
+			cfg, _, txArgs, err := prepare(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
 			if cfg.Coordinator != nil {
-				res, err := callCoordinator(cmd.Context(), cfg, ns, "query", tx)
+				res, err := callCoordinator(cmd.Context(), cfg, ns, "query", txArgs)
 				if err != nil {
 					return err
 				}
@@ -151,13 +147,13 @@ Service finality and prints the commit status. In direct-helper mode, it only
 submits to the orderer and does not wait for finality.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, tx, txArgs, err := prepare(cmd, args[0])
+			cfg, _, txArgs, err := prepare(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
 			if cfg.Coordinator != nil {
-				res, err := callCoordinator(cmd.Context(), cfg, ns, "invoke", tx)
+				res, err := callCoordinator(cmd.Context(), cfg, ns, "invoke", txArgs)
 				if err != nil {
 					return err
 				}
@@ -292,8 +288,8 @@ func validate(cfg Config) error {
 		if cfg.Coordinator.Endpoint == nil {
 			return fmt.Errorf("coordinator.endpoint is required")
 		}
-		if cfg.Coordinator.TLS.Mode != "" && cfg.Coordinator.TLS.Mode != network.TLSModeNone {
-			return fmt.Errorf("coordinator client currently supports only tls.mode none")
+		if cfg.Identity == nil {
+			return fmt.Errorf("identity is required for coordinator transport")
 		}
 		return nil
 	}
@@ -306,43 +302,56 @@ func validate(cfg Config) error {
 	return nil
 }
 
-func callCoordinator(ctx context.Context, cfg Config, namespace, operation string, tx txInput) (coordinator.InvocationResponse, error) {
-	req := coordinator.InvocationRequest{
-		Namespace: namespace,
-		Function:  tx.Function,
-		Args:      tx.Args,
+func callCoordinator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte) (coordinator.InvocationResponse, error) {
+	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
+	if err != nil {
+		return coordinator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
 	}
-	body, err := json.Marshal(req)
+
+	ec, err := network.NewEndorsementClient([]network.PeerConf{cfg.Coordinator.ToPeerConf()}, signer, cfg.ChannelID, namespace, "1.0")
+	if err != nil {
+		return coordinator.InvocationResponse{}, fmt.Errorf("create coordinator grpc client: %w", err)
+	}
+	defer ec.Close() //nolint:errcheck
+
+	args, err := coordinatorProposalArgs(operation, txArgs)
 	if err != nil {
 		return coordinator.InvocationResponse{}, err
 	}
 
-	url := fmt.Sprintf("http://%s/v1/%s", cfg.Coordinator.Endpoint.Address(), operation)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	end, err := ec.ExecuteTransaction(ctx, namespace, "1.0", args)
 	if err != nil {
-		return coordinator.InvocationResponse{}, err
+		return coordinator.InvocationResponse{}, fmt.Errorf("coordinator grpc call failed: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("call coordinator: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return coordinator.InvocationResponse{}, err
-	}
-	if resp.StatusCode >= 400 {
-		return coordinator.InvocationResponse{}, fmt.Errorf("coordinator %s: %s", resp.Status, string(data))
+	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
+		return coordinator.InvocationResponse{}, fmt.Errorf("coordinator returned no response")
 	}
 
+	resp := end.Responses[0].Response
 	var out coordinator.InvocationResponse
-	if err := json.Unmarshal(data, &out); err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("decode coordinator response: %w", err)
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		return coordinator.InvocationResponse{}, fmt.Errorf("decode coordinator grpc response: %w", err)
 	}
 	return out, nil
+}
+
+func coordinatorProposalArgs(operation string, txArgs [][]byte) ([][]byte, error) {
+	var marker string
+	switch operation {
+	case "invoke":
+		marker = coordinator.GRPCOperationInvoke
+	case "query":
+		marker = coordinator.GRPCOperationQuery
+	default:
+		return nil, fmt.Errorf("unknown coordinator operation %q", operation)
+	}
+
+	args := make([][]byte, 0, 1+len(txArgs))
+	args = append(args, []byte(marker))
+	for _, arg := range txArgs {
+		args = append(args, append([]byte(nil), arg...))
+	}
+	return args, nil
 }
 
 func buildEndorsementClient(cfg Config, signer identity.Signer, namespace string) (*network.EndorsementClient, error) {

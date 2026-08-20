@@ -18,8 +18,8 @@ msp:
 # Uses loadgen TLS identity for mTLS connections.
 tls:
   enabled: true
-  clientCert: ARTIFACTS_DIR/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.crt
-  clientKey: ARTIFACTS_DIR/peerOrganizations/peer-org-0/peers/loadgen.peer-org-0/tls/server.key
+  clientCert: ARTIFACTS_DIR/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+  clientKey: ARTIFACTS_DIR/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
   rootCerts:
     - ARTIFACTS_DIR/ordererOrganizations/orderer-org-1/msp/tlscacerts/tlsca.orderer-org-1-cert.pem
     - ARTIFACTS_DIR/ordererOrganizations/orderer-org-2/msp/tlscacerts/tlsca.orderer-org-2-cert.pem

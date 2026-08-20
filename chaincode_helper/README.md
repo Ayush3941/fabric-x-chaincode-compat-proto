@@ -18,7 +18,7 @@ Current V1 flow:
 
 ```text
 client CLI
--> coordinator HTTP API
+-> coordinator Fabric-X SDK ProcessProposal gRPC API
 -> helper peer.Endorser.ProcessProposal service
 -> pkg/api ExecutionContext
 -> pkg/shim CCAAS connector and message handler
@@ -37,7 +37,7 @@ cmd/coordinator/   client-facing coordinator and Fabric-X submit/finality path
 cmd/client/        small CLI for query/invoke through the coordinator
 pkg/api/           ProcessProposal service, ExecutionContext, Query adapter
 pkg/config/        YAML config structures
-pkg/coordinator/   HTTP API, helper call, submitter, notification wait
+pkg/coordinator/   gRPC ProcessProposal, helper call, submitter, notification wait
 pkg/shim/          CCAAS connector and Fabric ChaincodeMessage handler
 sampleconfig/      configs wired to ../artifacts from the Project network
 ```
@@ -74,14 +74,14 @@ Start the helper:
 
 ```bash
 cd chaincode_helper
-./bin/helper -c sampleconfig/helper1.yaml
+./bin/helper -c sampleconfig/helper.yaml
 ```
 
 Start the coordinator:
 
 ```bash
 cd chaincode_helper
-./bin/coordinator -c sampleconfig/coordinator1.yaml
+./bin/coordinator -c sampleconfig/coordinator.yaml
 ```
 
 Submit a real V1 invoke:
@@ -90,15 +90,15 @@ Submit a real V1 invoke:
 cd chaincode_helper
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"put","Args":["asset1","old-value"]}'
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"put","Args":["asset-to-delete","delete-me"]}'
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
 ```
 
@@ -128,7 +128,7 @@ The final response should include `commit_status: "COMMITTED"`.
   - returns the chaincode `COMPLETED` response and event payload
 
 - `pkg/coordinator/service.go`
-  - accepts lightweight JSON query/invoke requests
+  - accepts Fabric-X SDK signed proposals over gRPC
   - calls the helper
   - submits Fabric-X transactions
   - waits on Notification Service and returns finality

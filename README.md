@@ -9,7 +9,7 @@ The current V1 proof is deliberately narrow:
 
 ```text
 client CLI
--> coordinator HTTP API
+-> coordinator Fabric-X SDK ProcessProposal gRPC API
 -> helper peer.Endorser.ProcessProposal service
 -> external Fabric chaincode-as-a-service
 -> Fabric shim messages: GET_STATE / PUT_STATE / DEL_STATE / COMPLETED
@@ -32,7 +32,8 @@ The current prototype demonstrates:
 
 - one external Go chaincode service using the normal Fabric shim
 - one helper connected to Fabric-X Query Service
-- one coordinator that submits and waits for finality
+- one coordinator with an MSP/mTLS gRPC invocation path that submits and waits
+  for finality
 - public point reads through `GetState`
 - writes and deletes through `PutState` and `DelState`
 - read-your-writes behavior inside one chaincode invocation
@@ -177,14 +178,14 @@ Terminal 2, helper:
 
 ```bash
 cd chaincode_helper
-./bin/helper -c sampleconfig/helper1.yaml
+./bin/helper -c sampleconfig/helper.yaml
 ```
 
 Terminal 3, coordinator:
 
 ```bash
 cd chaincode_helper
-./bin/coordinator -c sampleconfig/coordinator1.yaml
+./bin/coordinator -c sampleconfig/coordinator.yaml
 ```
 
 The configured endpoints are:
@@ -192,28 +193,18 @@ The configured endpoints are:
 ```text
 chaincode service: 127.0.0.1:9999
 helper service:    127.0.0.1:9001
-coordinator API:   127.0.0.1:9101
+coordinator:       127.0.0.1:9102
 committer sidecar: 127.0.0.1:4001
 query service:     127.0.0.1:7001
 orderer router:    127.0.0.1:6022
 ```
 
-Health check:
-
-```bash
-curl -sS http://127.0.0.1:9101/healthz
-```
-
-Expected output:
-
-```text
-ok
-```
-
 ## Run A Real V1 Chaincode Simulation
 
-Use the coordinator-backed client config. The `invoke` command submits a real
-Fabric-X transaction and waits for Notification Service finality.
+Use the coordinator-backed client config. The client uses the Fabric-X SDK to
+create an MSP-signed proposal and sends it to the coordinator gRPC endpoint.
+The coordinator then submits a real Fabric-X transaction and waits for
+Notification Service finality.
 
 Create two committed keys first:
 
@@ -221,11 +212,11 @@ Create two committed keys first:
 cd chaincode_helper
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"put","Args":["asset1","old-value"]}'
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"put","Args":["asset-to-delete","delete-me"]}'
 ```
 
@@ -233,7 +224,7 @@ Run the full V1 compatibility path:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
 ```
 
@@ -272,11 +263,11 @@ Verify committed state:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client query \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"get","Args":["asset1"]}'
 
 FABRIC_LOGGING_SPEC=error ./bin/client query \
-  -c sampleconfig/client-coordinator.yaml \
+  -c sampleconfig/client.yaml \
   '{"Function":"get","Args":["asset-to-delete"]}'
 ```
 
@@ -347,12 +338,12 @@ cd sample_external_chaincode
 
 ```bash
 cd chaincode_helper
-./bin/helper -c sampleconfig/helper1.yaml
+./bin/helper -c sampleconfig/helper.yaml
 ```
 
 ```bash
 cd chaincode_helper
-./bin/coordinator -c sampleconfig/coordinator1.yaml
+./bin/coordinator -c sampleconfig/coordinator.yaml
 ```
 
 ## Stop And Clean

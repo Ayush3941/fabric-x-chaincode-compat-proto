@@ -13,22 +13,32 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"time"
 
 	"chaincode_helper/pkg/config"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	"github.com/hyperledger/fabric-x-committer/utils/serve"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
+	"github.com/hyperledger/fabric-x-sdk/endorsement"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
 	nfab "github.com/hyperledger/fabric-x-sdk/network/fabric"
 	nfabx "github.com/hyperledger/fabric-x-sdk/network/fabricx"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
+)
+
+const (
+	GRPCOperationInvoke = "__coordinator_invoke"
+	GRPCOperationQuery  = "__coordinator_query"
 )
 
 // Config contains the V1 coordinator wiring. The coordinator receives a small
@@ -38,7 +48,7 @@ type Config struct {
 	ChannelID       string                 `mapstructure:"channel-id"`
 	Namespace       string                 `mapstructure:"namespace"`
 	Protocol        string                 `mapstructure:"protocol"`
-	Server          config.ClientConfig    `mapstructure:"server"`
+	Server          *serve.ServerConfig    `mapstructure:"server"`
 	Identity        *config.IdentityConfig `mapstructure:"identity"`
 	Helpers         []config.ClientConfig  `mapstructure:"helpers"`
 	Orderer         *config.ClientConfig   `mapstructure:"orderer"`
@@ -47,8 +57,8 @@ type Config struct {
 	FinalityTimeout time.Duration          `mapstructure:"finality-timeout"`
 }
 
-// InvocationRequest is the client-facing V1 request. It deliberately carries
-// business input, not a Fabric SignedProposal.
+// InvocationRequest is the coordinator's internal normalized request after a
+// signed proposal has been parsed.
 type InvocationRequest struct {
 	Namespace string   `json:"namespace,omitempty"`
 	Function  string   `json:"function,omitempty"`
@@ -160,11 +170,10 @@ func (cfg Config) Validate() error {
 	if cfg.Identity == nil {
 		errs = append(errs, errors.New("identity is required"))
 	}
-	if cfg.Server.Endpoint == nil {
+	if cfg.Server == nil {
+		errs = append(errs, errors.New("server configuration is required"))
+	} else if cfg.Server.Endpoint.Empty() {
 		errs = append(errs, errors.New("server.endpoint is required"))
-	}
-	if cfg.Server.TLS.Mode != "" && cfg.Server.TLS.Mode != network.TLSModeNone {
-		errs = append(errs, errors.New("coordinator server currently supports only tls.mode none"))
 	}
 	if len(cfg.Helpers) == 0 {
 		errs = append(errs, errors.New("at least one helper is required"))
@@ -178,43 +187,17 @@ func (cfg Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Run starts the coordinator HTTP API.
+// Run starts the coordinator Fabric ProcessProposal gRPC API.
 func (s *Service) Run(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("POST /v1/query", s.handleQuery)
-	mux.HandleFunc("POST /v1/invoke", s.handleInvoke)
+	return serve.Serve(ctx, s, &serve.Config{GRPC: *s.cfg.Server})
+}
 
-	addr := s.cfg.Server.Endpoint.Address()
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
-	}
-	defer listener.Close() //nolint:errcheck
-
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		s.logger.Infof("coordinator listening on %s", addr)
-		errCh <- server.Serve(listener)
-	}()
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return ctx.Err()
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	}
+// RegisterService implements serve.Registerer.
+func (s *Service) RegisterService(servers serve.Servers) {
+	peer.RegisterEndorserServer(servers.GRPC, s)
+	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
+	reflection.Register(servers.GRPC)
+	s.logger.Infof("coordinator gRPC ProcessProposal registered")
 }
 
 // Close closes outbound connections held by the coordinator.
@@ -232,39 +215,41 @@ func (s *Service) Close() error {
 	return errors.Join(errs...)
 }
 
-func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (s *Service) handleQuery(w http.ResponseWriter, r *http.Request) {
-	s.handleOperation(w, r, false)
-}
-
-func (s *Service) handleInvoke(w http.ResponseWriter, r *http.Request) {
-	s.handleOperation(w, r, true)
-}
-
-func (s *Service) handleOperation(w http.ResponseWriter, r *http.Request, submit bool) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method must be POST", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req InvocationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decode request: %w", err))
-		return
-	}
-
-	res, err := s.Execute(r.Context(), req, submit)
+// ProcessProposal accepts an MSP-signed Fabric proposal from the coordinator
+// client. The first proposal argument is a coordinator operation marker; it is
+// stripped before the helper invokes chaincode.
+func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
+	inv, err := endorsement.Parse(prop, time.Now())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if inv.Channel != s.cfg.ChannelID {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("channel must be %s", s.cfg.ChannelID))
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
+	req, submit, err := requestFromProposal(inv)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	res, err := s.Execute(ctx, req, submit)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	payload, err := json.Marshal(res)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &peer.ProposalResponse{
+		Version: 1,
+		Response: &peer.Response{
+			Status:  res.Status,
+			Message: res.Message,
+			Payload: payload,
+		},
+	}, nil
 }
 
 // Execute runs one query or invoke through helper endorsement. Invokes are also
@@ -454,6 +439,33 @@ func invocationArgs(req InvocationRequest) [][]byte {
 	return args
 }
 
+func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, bool, error) {
+	if len(inv.Args) < 2 {
+		return InvocationRequest{}, false, errors.New("coordinator proposal requires operation marker and function")
+	}
+
+	var submit bool
+	switch string(inv.Args[0]) {
+	case GRPCOperationInvoke:
+		submit = true
+	case GRPCOperationQuery:
+		submit = false
+	default:
+		return InvocationRequest{}, false, fmt.Errorf("unknown coordinator operation %q", string(inv.Args[0]))
+	}
+
+	req := InvocationRequest{
+		Function: string(inv.Args[1]),
+	}
+	if inv.CCID != nil {
+		req.Namespace = inv.CCID.Name
+	}
+	for _, arg := range inv.Args[2:] {
+		req.Args = append(req.Args, string(arg))
+	}
+	return req, submit, nil
+}
+
 func responseFromPeer(txID string, resp *peer.Response) InvocationResponse {
 	return InvocationResponse{
 		TxID:          txID,
@@ -506,10 +518,4 @@ func txIDFromEndorsement(end sdk.Endorsement) (string, error) {
 		return "", fmt.Errorf("unmarshal channel header: %w", err)
 	}
 	return chdr.TxId, nil
-}
-
-func writeError(w http.ResponseWriter, code int, err error) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
