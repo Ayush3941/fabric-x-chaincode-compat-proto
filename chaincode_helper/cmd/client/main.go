@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"chaincode_helper/pkg/config"
-	"chaincode_helper/pkg/coordinator"
+	"chaincode_helper/pkg/orchestrator"
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
 	"github.com/hyperledger/fabric-x-sdk/identity"
@@ -41,8 +41,8 @@ type Config struct {
 	// Identity is the MSP identity used for signing the proposal and the transaction.
 	Identity *config.IdentityConfig `mapstructure:"identity"`
 
-	// Coordinator is the V1 client-facing ProcessProposal endpoint.
-	Coordinator *config.ClientConfig `mapstructure:"coordinator"`
+	// Orchestrator is the V1 client-facing ProcessProposal endpoint.
+	Orchestrator *config.ClientConfig `mapstructure:"orchestrator"`
 
 	// Endorsers is the list of ProcessProposal endpoints, one per organization.
 	// Each entry has its own TLS configuration because helpers run at different orgs.
@@ -67,11 +67,11 @@ func main() {
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Client - Example Fabric-X helper client",
-		Long: `Client sends invocations to the coordinator when configured, or directly
+		Long: `Client sends invocations to the orchestrator when configured, or directly
 to helper services for lower-level testing.
 
   query  — endorse only; prints the response payload (read-only)
-  invoke — runs the write path and prints the coordinator/direct result`,
+  invoke — runs the write path and prints the orchestrator/direct result`,
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
 	cmd.PersistentFlags().String("namespace", "", "Namespace to invoke (overrides config)")
@@ -96,13 +96,13 @@ func newQueryCmd() *cobra.Command {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			if cfg.Coordinator != nil {
-				res, err := callCoordinator(cmd.Context(), cfg, ns, "query", txArgs)
+			if cfg.Orchestrator != nil {
+				res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs)
 				if err != nil {
 					return err
 				}
 				if res.Status < 200 || res.Status >= 400 {
-					return fmt.Errorf("coordinator returned error status %d: %s", res.Status, res.Message)
+					return fmt.Errorf("orchestrator returned error status %d: %s", res.Status, res.Message)
 				}
 				cmd.Print(res.Payload)
 				return nil
@@ -142,7 +142,7 @@ func newInvokeCmd() *cobra.Command {
 		Use:   `invoke '{"function":"...","Args":[]}'`,
 		Short: "Endorse a transaction and submit it to the orderer",
 		Long: `Endorse a transaction and submit it to the orderer.
-When configured with a coordinator endpoint, this waits for Notification
+When configured with an orchestrator endpoint, this waits for Notification
 Service finality and prints the commit status. In direct-helper mode, it only
 submits to the orderer and does not wait for finality.`,
 		Args: cobra.ExactArgs(1),
@@ -152,8 +152,8 @@ submits to the orderer and does not wait for finality.`,
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			if cfg.Coordinator != nil {
-				res, err := callCoordinator(cmd.Context(), cfg, ns, "invoke", txArgs)
+			if cfg.Orchestrator != nil {
+				res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs)
 				if err != nil {
 					return err
 				}
@@ -284,12 +284,12 @@ func validate(cfg Config) error {
 	if cfg.Namespace == "" {
 		return fmt.Errorf("namespace is required")
 	}
-	if cfg.Coordinator != nil {
-		if cfg.Coordinator.Endpoint == nil {
-			return fmt.Errorf("coordinator.endpoint is required")
+	if cfg.Orchestrator != nil {
+		if cfg.Orchestrator.Endpoint == nil {
+			return fmt.Errorf("orchestrator.endpoint is required")
 		}
 		if cfg.Identity == nil {
-			return fmt.Errorf("identity is required for coordinator transport")
+			return fmt.Errorf("identity is required for orchestrator transport")
 		}
 		return nil
 	}
@@ -302,48 +302,48 @@ func validate(cfg Config) error {
 	return nil
 }
 
-func callCoordinator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte) (coordinator.InvocationResponse, error) {
+func callOrchestrator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte) (orchestrator.InvocationResponse, error) {
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
+		return orchestrator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
 	}
 
-	ec, err := network.NewEndorsementClient([]network.PeerConf{cfg.Coordinator.ToPeerConf()}, signer, cfg.ChannelID, namespace, "1.0")
+	ec, err := network.NewEndorsementClient([]network.PeerConf{cfg.Orchestrator.ToPeerConf()}, signer, cfg.ChannelID, namespace, "1.0")
 	if err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("create coordinator grpc client: %w", err)
+		return orchestrator.InvocationResponse{}, fmt.Errorf("create orchestrator grpc client: %w", err)
 	}
 	defer ec.Close() //nolint:errcheck
 
-	args, err := coordinatorProposalArgs(operation, txArgs)
+	args, err := orchestratorProposalArgs(operation, txArgs)
 	if err != nil {
-		return coordinator.InvocationResponse{}, err
+		return orchestrator.InvocationResponse{}, err
 	}
 
 	end, err := ec.ExecuteTransaction(ctx, namespace, "1.0", args)
 	if err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("coordinator grpc call failed: %w", err)
+		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator grpc call failed: %w", err)
 	}
 	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("coordinator returned no response")
+		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator returned no response")
 	}
 
 	resp := end.Responses[0].Response
-	var out coordinator.InvocationResponse
+	var out orchestrator.InvocationResponse
 	if err := json.Unmarshal(resp.Payload, &out); err != nil {
-		return coordinator.InvocationResponse{}, fmt.Errorf("decode coordinator grpc response: %w", err)
+		return orchestrator.InvocationResponse{}, fmt.Errorf("decode orchestrator grpc response: %w", err)
 	}
 	return out, nil
 }
 
-func coordinatorProposalArgs(operation string, txArgs [][]byte) ([][]byte, error) {
+func orchestratorProposalArgs(operation string, txArgs [][]byte) ([][]byte, error) {
 	var marker string
 	switch operation {
 	case "invoke":
-		marker = coordinator.GRPCOperationInvoke
+		marker = orchestrator.GRPCOperationInvoke
 	case "query":
-		marker = coordinator.GRPCOperationQuery
+		marker = orchestrator.GRPCOperationQuery
 	default:
-		return nil, fmt.Errorf("unknown coordinator operation %q", operation)
+		return nil, fmt.Errorf("unknown orchestrator operation %q", operation)
 	}
 
 	args := make([][]byte, 0, 1+len(txArgs))

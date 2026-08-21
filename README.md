@@ -3,13 +3,13 @@
 This repository is a local real-network test environment for the Fabric
 chaincode compatibility prototype. It runs a real Fabric-X ordering and
 committer path, then executes an unchanged Go Fabric chaincode as an external
-chaincode service through the prototype helper/coordinator.
+chaincode service through the prototype helper/orchestrator.
 
 The current V1 proof is deliberately narrow:
 
 ```text
 client CLI
--> coordinator Fabric-X SDK ProcessProposal gRPC API
+-> orchestrator Fabric-X SDK ProcessProposal gRPC API
 -> helper peer.Endorser.ProcessProposal service
 -> external Fabric chaincode-as-a-service
 -> Fabric shim messages: GET_STATE / PUT_STATE / DEL_STATE / COMPLETED
@@ -32,7 +32,7 @@ The current prototype demonstrates:
 
 - one external Go chaincode service using the normal Fabric shim
 - one helper connected to Fabric-X Query Service
-- one coordinator with an MSP/mTLS gRPC invocation path that submits and waits
+- one orchestrator with an MSP/mTLS gRPC invocation path that submits and waits
   for finality
 - public point reads through `GetState`
 - writes and deletes through `PutState` and `DelState`
@@ -51,7 +51,7 @@ original Fabric event name passed to `stub.SetEvent`.
 ## Layout
 
 ```text
-chaincode_helper/          helper, coordinator, and client CLI
+chaincode_helper/          helper, orchestrator, and client CLI
 sample_external_chaincode/ unchanged-style Go chaincode-as-a-service sample
 cmd/block-dump/            block inspection tool for committed Fabric-X blocks
 cmd/rws-smoke/             lower-level SDK RW-set smoke client
@@ -133,7 +133,7 @@ That submits a hard-coded Fabric-X RW set through `cmd/rws-smoke`.
 cd chaincode_helper
 go build -o bin/client ./cmd/client
 go build -o bin/helper ./cmd/helper
-go build -o bin/coordinator ./cmd/coordinator
+go build -o bin/orchestrator ./cmd/orchestrator
 
 cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
@@ -181,11 +181,11 @@ cd chaincode_helper
 ./bin/helper -c sampleconfig/helper.yaml
 ```
 
-Terminal 3, coordinator:
+Terminal 3, orchestrator:
 
 ```bash
 cd chaincode_helper
-./bin/coordinator -c sampleconfig/coordinator.yaml
+./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
 The configured endpoints are:
@@ -193,7 +193,7 @@ The configured endpoints are:
 ```text
 chaincode service: 127.0.0.1:9999
 helper service:    127.0.0.1:9001
-coordinator:       127.0.0.1:9102
+orchestrator:      127.0.0.1:9102
 committer sidecar: 127.0.0.1:4001
 query service:     127.0.0.1:7001
 orderer router:    127.0.0.1:6022
@@ -201,32 +201,24 @@ orderer router:    127.0.0.1:6022
 
 ## Run A Real V1 Chaincode Simulation
 
-Use the coordinator-backed client config. The client uses the Fabric-X SDK to
-create an MSP-signed proposal and sends it to the coordinator gRPC endpoint.
-The coordinator then submits a real Fabric-X transaction and waits for
+Use the orchestrator-backed client config. The client uses the Fabric-X SDK to
+create an MSP-signed proposal and sends it to the orchestrator gRPC endpoint.
+The orchestrator then submits a real Fabric-X transaction and waits for
 Notification Service finality.
 
-Create two committed keys first:
+Run the full V1 compatibility path:
 
 ```bash
 cd chaincode_helper
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client.yaml \
-  '{"Function":"put","Args":["asset1","old-value"]}'
-
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
-  '{"Function":"put","Args":["asset-to-delete","delete-me"]}'
-```
-
-Run the full V1 compatibility path:
-
-```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
   '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
 ```
+
+`compatv1` seeds `old-value` and `delete-me` inside the same chaincode
+invocation before applying the final write and delete. No earlier setup
+transaction is required.
 
 The response should be JSON with:
 
@@ -248,6 +240,10 @@ function
 parameters
 tx_id
 channel_id
+committed_old_value
+committed_delete_old_value
+seed_old_value
+seed_delete_value
 old_value
 after_put_value
 delete_old_value
@@ -321,7 +317,7 @@ restart the three V1 processes:
 cd chaincode_helper
 go build -o bin/client ./cmd/client
 go build -o bin/helper ./cmd/helper
-go build -o bin/coordinator ./cmd/coordinator
+go build -o bin/orchestrator ./cmd/orchestrator
 
 cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
@@ -343,7 +339,7 @@ cd chaincode_helper
 
 ```bash
 cd chaincode_helper
-./bin/coordinator -c sampleconfig/coordinator.yaml
+./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
 ## Stop And Clean
@@ -366,7 +362,7 @@ Included in V1:
 
 - single Fabric-X namespace: `0`
 - single organization policy by default: `OR('org-0.member')`
-- one helper and one coordinator
+- one helper and one orchestrator
 - public point reads/writes/deletes
 - one external Go chaincode service
 - Query Service reads

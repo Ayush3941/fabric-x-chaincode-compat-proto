@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package coordinator
+package orchestrator
 
 import (
 	"context"
@@ -33,11 +33,11 @@ import (
 )
 
 const (
-	GRPCOperationInvoke = "__coordinator_invoke"
-	GRPCOperationQuery  = "__coordinator_query"
+	GRPCOperationInvoke = "__orchestrator_invoke"
+	GRPCOperationQuery  = "__orchestrator_query"
 )
 
-// Config contains the V1 coordinator wiring. The coordinator receives a small
+// Config contains the V1 orchestrator wiring. The orchestrator receives a small
 // invocation request, sends a real signed proposal to the helper, and submits
 // the helper's endorsed Fabric-X transaction to the orderer.
 type Config struct {
@@ -53,7 +53,7 @@ type Config struct {
 	FinalityTimeout time.Duration          `mapstructure:"finality-timeout"`
 }
 
-// InvocationRequest is the coordinator's internal normalized request after a
+// InvocationRequest is the orchestrator's internal normalized request after a
 // signed proposal has been parsed.
 type InvocationRequest struct {
 	Namespace string   `json:"namespace,omitempty"`
@@ -84,7 +84,7 @@ type ChaincodeEvent struct {
 	PayloadBase64 string `json:"payload_base64,omitempty"`
 }
 
-// Service is the coordinator process.
+// Service is the orchestrator process.
 type Service struct {
 	cfg       Config
 	signer    sdk.Signer
@@ -95,7 +95,7 @@ type Service struct {
 	logger    sdk.Logger
 }
 
-// New constructs the coordinator and dials the helper, orderer, and
+// New constructs the orchestrator and dials the helper, orderer, and
 // notification endpoints.
 func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
@@ -183,7 +183,7 @@ func (cfg Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Run starts the coordinator Fabric ProcessProposal gRPC API.
+// Run starts the orchestrator Fabric ProcessProposal gRPC API.
 func (s *Service) Run(ctx context.Context) error {
 	return serve.Serve(ctx, s, &serve.Config{GRPC: *s.cfg.Server})
 }
@@ -193,10 +193,10 @@ func (s *Service) RegisterService(servers serve.Servers) {
 	peer.RegisterEndorserServer(servers.GRPC, s)
 	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
 	reflection.Register(servers.GRPC)
-	s.logger.Infof("coordinator gRPC ProcessProposal registered")
+	s.logger.Infof("orchestrator gRPC ProcessProposal registered")
 }
 
-// Close closes outbound connections held by the coordinator.
+// Close closes outbound connections held by the orchestrator.
 func (s *Service) Close() error {
 	var errs []error
 	if s.submitter != nil {
@@ -211,8 +211,8 @@ func (s *Service) Close() error {
 	return errors.Join(errs...)
 }
 
-// ProcessProposal accepts an MSP-signed Fabric proposal from the coordinator
-// client. The first proposal argument is a coordinator operation marker; it is
+// ProcessProposal accepts an MSP-signed Fabric proposal from the orchestrator
+// client. The first proposal argument is an orchestrator operation marker; it is
 // stripped before the helper invokes chaincode.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
@@ -437,7 +437,7 @@ func invocationArgs(req InvocationRequest) [][]byte {
 
 func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, bool, error) {
 	if len(inv.Args) < 2 {
-		return InvocationRequest{}, false, errors.New("coordinator proposal requires operation marker and function")
+		return InvocationRequest{}, false, errors.New("orchestrator proposal requires operation marker and function")
 	}
 
 	var submit bool
@@ -447,7 +447,7 @@ func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, bool, e
 	case GRPCOperationQuery:
 		submit = false
 	default:
-		return InvocationRequest{}, false, fmt.Errorf("unknown coordinator operation %q", string(inv.Args[0]))
+		return InvocationRequest{}, false, fmt.Errorf("unknown orchestrator operation %q", string(inv.Args[0]))
 	}
 
 	req := InvocationRequest{

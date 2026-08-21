@@ -8,7 +8,7 @@ identity:
   msp-id: org-0
   msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/msp
 
-coordinator:
+orchestrator:
   endpoint:
     host: 127.0.0.1
     port: 9102

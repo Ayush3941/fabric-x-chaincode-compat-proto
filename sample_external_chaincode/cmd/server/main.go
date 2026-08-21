@@ -88,7 +88,21 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 			return shim.Error("compatv1 expects 3 arguments: key value delete_key")
 		}
 		key, value, deleteKey := args[0], args[1], args[2]
+		seedOldValue := "old-value"
+		seedDeleteValue := "delete-me"
 
+		committedOldValue, err := stub.GetState(key)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		committedDeleteValue, err := stub.GetState(deleteKey)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		if err := stub.PutState(key, []byte(seedOldValue)); err != nil {
+			return shim.Error(err.Error())
+		}
 		oldValue, err := stub.GetState(key)
 		if err != nil {
 			return shim.Error(err.Error())
@@ -101,6 +115,9 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 			return shim.Error(err.Error())
 		}
 
+		if err := stub.PutState(deleteKey, []byte(seedDeleteValue)); err != nil {
+			return shim.Error(err.Error())
+		}
 		deleteOldValue, err := stub.GetState(deleteKey)
 		if err != nil {
 			return shim.Error(err.Error())
@@ -124,21 +141,25 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 
 		function, params := stub.GetFunctionAndParameters()
 		payload, err := json.Marshal(map[string]any{
-			"args":               byteArgsToStrings(stub.GetArgs()),
-			"string_args":        stub.GetStringArgs(),
-			"function":           function,
-			"parameters":         params,
-			"tx_id":              stub.GetTxID(),
-			"channel_id":         stub.GetChannelID(),
-			"old_value":          nullableString(oldValue),
-			"after_put_value":    nullableString(afterPutValue),
-			"delete_old_value":   nullableString(deleteOldValue),
-			"after_delete_value": nullableString(afterDeleteValue),
-			"composite_key":      compositeKey,
-			"split_object_type":  splitObjectType,
-			"split_attributes":   splitAttributes,
-			"ok_status":          shim.OK,
-			"error_status":       shim.ERROR,
+			"args":                       byteArgsToStrings(stub.GetArgs()),
+			"string_args":                stub.GetStringArgs(),
+			"function":                   function,
+			"parameters":                 params,
+			"tx_id":                      stub.GetTxID(),
+			"channel_id":                 stub.GetChannelID(),
+			"committed_old_value":        nullableString(committedOldValue),
+			"committed_delete_old_value": nullableString(committedDeleteValue),
+			"seed_old_value":             seedOldValue,
+			"seed_delete_value":          seedDeleteValue,
+			"old_value":                  nullableString(oldValue),
+			"after_put_value":            nullableString(afterPutValue),
+			"delete_old_value":           nullableString(deleteOldValue),
+			"after_delete_value":         nullableString(afterDeleteValue),
+			"composite_key":              compositeKey,
+			"split_object_type":          splitObjectType,
+			"split_attributes":           splitAttributes,
+			"ok_status":                  shim.OK,
+			"error_status":               shim.ERROR,
 		})
 		if err != nil {
 			return shim.Error(err.Error())

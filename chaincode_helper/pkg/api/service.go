@@ -47,7 +47,7 @@ type Executor interface {
 	Execute(context.Context, *ExecutionContext, endorsement.Invocation) (endorsement.ExecutionResult, ExecutionMetadata, error)
 }
 
-// ExecutionMetadata is helper/coordinator metadata produced during execution.
+// ExecutionMetadata is helper/orchestrator metadata produced during execution.
 // It is deliberately kept outside endorsement.ExecutionResult so Fabric-X
 // endorsement payloads remain clean.
 type ExecutionMetadata struct {
@@ -125,7 +125,7 @@ func NewExecutionContext(reader StateReader, namespace string) *ExecutionContext
 }
 
 // NewExecutionContextWithView creates the transient context using a Query
-// Service view supplied by a coordinator.
+// Service view supplied by an orchestrator.
 func NewExecutionContextWithView(reader StateReader, namespace string, view *committerpb.View) *ExecutionContext {
 	return &ExecutionContext{
 		reader:    reader,

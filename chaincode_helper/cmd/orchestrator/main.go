@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"chaincode_helper/pkg/coordinator"
+	"chaincode_helper/pkg/orchestrator"
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
 	"github.com/spf13/cobra"
@@ -25,8 +25,8 @@ func main() {
 	defer stop()
 
 	cmd := &cobra.Command{
-		Use:          "coordinator",
-		Short:        "Coordinator - client-facing Fabric-X chaincode invocation service",
+		Use:          "orchestrator",
+		Short:        "Orchestrator - client-facing Fabric-X chaincode invocation service",
 		RunE:         run,
 		SilenceUsage: true,
 	}
@@ -53,7 +53,7 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 	f.Close()
 
-	var cfg coordinator.Config
+	var cfg orchestrator.Config
 	if err := parser.EnhancedExactUnmarshal(&cfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
@@ -65,10 +65,10 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 	flogging.Init(logging)
 
-	logger := flogging.MustGetLogger("coordinator")
-	svc, err := coordinator.New(cmd.Context(), cfg, logger)
+	logger := flogging.MustGetLogger("orchestrator")
+	svc, err := orchestrator.New(cmd.Context(), cfg, logger)
 	if err != nil {
-		return fmt.Errorf("create coordinator: %w", err)
+		return fmt.Errorf("create orchestrator: %w", err)
 	}
 	defer svc.Close() //nolint:errcheck
 
