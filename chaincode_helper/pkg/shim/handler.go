@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	sdk "github.com/hyperledger/fabric-x-sdk"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -18,14 +19,19 @@ type messageHandler struct {
 	state  State
 	inv    Invocation
 	ccid   string
+	logger sdk.Logger
 }
 
-func newMessageHandler(stream peer.Chaincode_ConnectClient, state State, inv Invocation, ccid string) *messageHandler {
+func newMessageHandler(stream peer.Chaincode_ConnectClient, state State, inv Invocation, ccid string, logger sdk.Logger) *messageHandler {
+	if logger == nil {
+		logger = sdk.NoOpLogger{}
+	}
 	return &messageHandler{
 		stream: stream,
 		state:  state,
 		inv:    inv,
 		ccid:   ccid,
+		logger: logger,
 	}
 }
 
@@ -68,6 +74,7 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 		case peer.ChaincodeMessage_COMPLETED:
 			return h.completedResult(msg)
 		case peer.ChaincodeMessage_ERROR:
+			h.logger.Warnf("tx=%s shim ERROR payload_bytes=%d", h.inv.TxID, len(msg.Payload))
 			return Result{
 				Status:    http.StatusInternalServerError,
 				Message:   string(msg.Payload),
@@ -76,6 +83,7 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 				QueryView: h.state.QueryView(),
 			}, nil
 		default:
+			h.logger.Warnf("tx=%s shim unsupported message type=%s", h.inv.TxID, msg.Type)
 			if err := h.sendError(msg, fmt.Errorf("unsupported chaincode message type %s", msg.Type)); err != nil {
 				return Result{}, err
 			}
@@ -96,6 +104,8 @@ func (h *messageHandler) sendTransaction() error {
 		Txid:      h.inv.TxID,
 		ChannelId: h.inv.ChannelID,
 	}
+	h.logger.Infof("tx=%s shim TRANSACTION sent ccid=%s fn=%s args=%d channel=%s",
+		h.inv.TxID, h.ccid, firstArg(h.inv.Args), len(h.inv.Args)-1, h.inv.ChannelID)
 	if err := h.stream.Send(msg); err != nil {
 		return fmt.Errorf("send TRANSACTION to chaincode: %w", err)
 	}
@@ -115,6 +125,7 @@ func (h *messageHandler) handleGetState(ctx context.Context, msg *peer.Chaincode
 	if err != nil {
 		return h.sendError(msg, fmt.Errorf("get state %q: %w", req.Key, err))
 	}
+	h.logger.Debugf("tx=%s shim GET_STATE key=%q value=%s", h.inv.TxID, req.Key, describeBytes(value))
 	return h.sendResponse(msg, value)
 }
 
@@ -128,6 +139,7 @@ func (h *messageHandler) handlePutState(msg *peer.ChaincodeMessage) error {
 	}
 
 	h.state.PutState(req.Key, req.Value)
+	h.logger.Debugf("tx=%s shim PUT_STATE key=%q value=%s", h.inv.TxID, req.Key, describeBytes(req.Value))
 	return h.sendResponse(msg, nil)
 }
 
@@ -141,6 +153,7 @@ func (h *messageHandler) handleDelState(msg *peer.ChaincodeMessage) error {
 	}
 
 	h.state.DelState(req.Key)
+	h.logger.Debugf("tx=%s shim DEL_STATE key=%q", h.inv.TxID, req.Key)
 	return h.sendResponse(msg, nil)
 }
 
@@ -150,6 +163,8 @@ func (h *messageHandler) completedResult(msg *peer.ChaincodeMessage) (Result, er
 		return Result{}, fmt.Errorf("unmarshal COMPLETED response: %w", err)
 	}
 
+	h.logger.Infof("tx=%s shim COMPLETED status=%d payload_bytes=%d event_bytes=%d",
+		h.inv.TxID, response.Status, len(response.Payload), len(eventPayload(msg.ChaincodeEvent)))
 	return Result{
 		Status:    response.Status,
 		Message:   response.Message,
@@ -182,4 +197,24 @@ func eventPayload(event *peer.ChaincodeEvent) []byte {
 		return nil
 	}
 	return append([]byte(nil), event.Payload...)
+}
+
+func firstArg(args [][]byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return string(args[0])
+}
+
+func describeBytes(value []byte) string {
+	if value == nil {
+		return "<nil>"
+	}
+	if len(value) == 0 {
+		return `""`
+	}
+	if len(value) <= 64 {
+		return fmt.Sprintf("%q(%db)", string(value), len(value))
+	}
+	return fmt.Sprintf("(%db)", len(value))
 }

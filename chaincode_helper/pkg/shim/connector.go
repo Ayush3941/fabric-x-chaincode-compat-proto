@@ -11,6 +11,7 @@ import (
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
+	sdk "github.com/hyperledger/fabric-x-sdk"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -61,6 +62,7 @@ type Config struct {
 type Connector struct {
 	endpoint    string
 	dialOptions []grpc.DialOption
+	logger      sdk.Logger
 }
 
 // NewConnector creates a shim bridge connector for a chaincode-as-a-service endpoint.
@@ -68,12 +70,21 @@ func NewConnector(cfg Config) (*Connector, error) {
 	if cfg.Endpoint == "" {
 		return nil, errors.New("chaincode service endpoint is required")
 	}
-	return &Connector{endpoint: cfg.Endpoint}, nil
+	return &Connector{endpoint: cfg.Endpoint, logger: sdk.NoOpLogger{}}, nil
 }
 
 // Endpoint returns the configured chaincode service endpoint.
 func (c *Connector) Endpoint() string {
 	return c.endpoint
+}
+
+// SetLogger configures the logger used for CCAAS protocol tracing.
+func (c *Connector) SetLogger(logger sdk.Logger) {
+	if logger == nil {
+		c.logger = sdk.NoOpLogger{}
+		return
+	}
+	c.logger = logger
 }
 
 // Execute will drive the peer side of the Fabric CCAAS stream.
@@ -92,7 +103,12 @@ func (c *Connector) Execute(ctx context.Context, state State, inv Invocation) (R
 	if state == nil {
 		return Result{}, errors.New("shim state adapter is nil")
 	}
+	if c.logger == nil {
+		c.logger = sdk.NoOpLogger{}
+	}
 
+	c.logger.Infof("tx=%s ccaas connect endpoint=%s namespace=%s channel=%s args=%d",
+		inv.TxID, c.endpoint, inv.Namespace, inv.ChannelID, len(inv.Args))
 	stream, closeConn, err := c.openStream(ctx)
 	if err != nil {
 		return Result{}, err
@@ -103,18 +119,25 @@ func (c *Connector) Execute(ctx context.Context, state State, inv Invocation) (R
 	if err != nil {
 		return Result{}, err
 	}
+	c.logger.Infof("tx=%s ccaas REGISTER received ccid=%s endpoint=%s", inv.TxID, ccid.Name, c.endpoint)
 
 	if err := stream.Send(&peer.ChaincodeMessage{Type: peer.ChaincodeMessage_REGISTERED}); err != nil {
 		return Result{}, fmt.Errorf("send REGISTERED to chaincode service %s: %w", c.endpoint, err)
 	}
+	c.logger.Debugf("tx=%s ccaas REGISTERED sent", inv.TxID)
 
 	if err := stream.Send(&peer.ChaincodeMessage{Type: peer.ChaincodeMessage_READY}); err != nil {
 		return Result{}, fmt.Errorf("send READY to chaincode service %s: %w", c.endpoint, err)
 	}
+	c.logger.Debugf("tx=%s ccaas READY sent", inv.TxID)
 
-	res, err := newMessageHandler(stream, state, inv, ccid.Name).Execute(ctx)
+	res, err := newMessageHandler(stream, state, inv, ccid.Name, c.logger).Execute(ctx)
 	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
 		return Result{}, fmt.Errorf("close chaincode stream to %s: %w", c.endpoint, closeErr)
+	}
+	if err == nil {
+		c.logger.Infof("tx=%s ccaas execution finished status=%d payload_bytes=%d event_bytes=%d",
+			inv.TxID, res.Status, len(res.Payload), len(res.Event))
 	}
 	return res, err
 }

@@ -1,75 +1,60 @@
-# Fabric-X Chaincode Compatibility Project Workspace
+# Fabric-X Chaincode Compatibility Prototype
 
-This repository is a local real-network test environment for the Fabric
-chaincode compatibility prototype. It runs a real Fabric-X ordering and
-committer path, then executes an unchanged Go Fabric chaincode as an external
-chaincode service through the prototype helper/orchestrator.
+This repository is a real-network V1 prototype for running an unchanged Go
+Fabric chaincode against Fabric-X infrastructure.
 
-The current V1 proof is deliberately narrow:
+The V1 flow is:
 
 ```text
 client CLI
--> orchestrator Fabric-X SDK ProcessProposal gRPC API
--> helper peer.Endorser.ProcessProposal service
+-> orchestrator gRPC endpoint
+-> helper gRPC endpoint
 -> external Fabric chaincode-as-a-service
--> Fabric shim messages: GET_STATE / PUT_STATE / DEL_STATE / COMPLETED
--> Fabric-X Query Service for committed reads
--> in-memory RW capture and read-your-writes overlay
--> Fabric-X SDK MESSAGE transaction
--> real Arma orderer
--> Fabric-X committer sidecar/coordinator/verifier/VC
+-> Fabric-X Query Service for reads
+-> local read/write capture
+-> Fabric-X transaction submit
 -> Notification Service finality
--> block/query inspection
+-> block inspection
 ```
 
-This is not a mock ledger. Blocks are committed under
-`runtime/committer/ledger`, and the committed state is readable through the
-Fabric-X Query Service.
+This is not a mock ledger. The orderer and committer containers create real
+Fabric-X blocks under `runtime/committer/ledger`.
 
-## What V1 Proves
+## What Works
 
-The current prototype demonstrates:
+- External Go chaincode using the normal Fabric shim server.
+- `GetState`, `PutState`, `DelState`, and read-your-writes behavior.
+- `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
+- `GetTxID`, `GetChannelID`.
+- `CreateCompositeKey`, `SplitCompositeKey`.
+- `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`.
+- One event payload through `SetEvent`.
+- Real Fabric-X transaction submission and committed-status confirmation.
 
-- one external Go chaincode service using the normal Fabric shim
-- one helper connected to Fabric-X Query Service
-- one orchestrator with an MSP/mTLS gRPC invocation path that submits and waits
-  for finality
-- public point reads through `GetState`
-- writes and deletes through `PutState` and `DelState`
-- read-your-writes behavior inside one chaincode invocation
-- `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
-- `GetTxID` and `GetChannelID`
-- `CreateCompositeKey` and `SplitCompositeKey`
-- `shim.Success`, `shim.Error`, `shim.OK`, and `shim.ERROR`
-- one event payload through `SetEvent`
-- real Fabric-X transaction submission and commit verification
+Known V1 limitation: Fabric-X SDK event metadata currently keeps the event
+payload, but the committed event name is the SDK default `log`.
 
-Known V1 limitation: because the current Fabric-X SDK event field only carries
-event payload bytes, the committed event name is the SDK default `log`, not the
-original Fabric event name passed to `stub.SetEvent`.
-
-## Layout
+## Repository Layout
 
 ```text
-chaincode_helper/          helper, orchestrator, and client CLI
-sample_external_chaincode/ unchanged-style Go chaincode-as-a-service sample
-cmd/block-dump/            block inspection tool for committed Fabric-X blocks
-cmd/rws-smoke/             lower-level SDK RW-set smoke client
-committerconfig/           Fabric-X committer service configs
-networkconfig/             crypto/configtx/Arma network inputs
-ordererconfig/             Arma role config templates
-fxconfig/                  namespace lifecycle client config templates
-patches/                   build compatibility patch for orderer image
-scripts/                   build/start/create-namespace/smoke/stop helpers
-artifacts/                 generated crypto/config/tx artifacts; ignored
-runtime/                   local process logs and committer ledger; ignored
-storage/                   Arma orderer runtime storage; ignored
-bin/                       generated tools; ignored
+chaincode_helper/          helper, orchestrator, client CLI
+sample_external_chaincode/ sample external Go chaincode service
+cmd/block-dump/            readable block inspection tool
+cmd/rws-smoke/             lower-level Fabric-X RW-set smoke client
+scripts/                   build, setup, start, stop helpers
+fxconfig/                  namespace setup config template
+networkconfig/             crypto and channel config inputs
+committerconfig/           Fabric-X committer container configs
+ordererconfig/             Arma orderer config templates
+artifacts/                 generated crypto/config artifacts, ignored
+runtime/                   logs and committer ledger, ignored
+storage/                   Arma runtime storage, ignored
+bin/                       generated Fabric-X tools, ignored
 ```
 
 ## Prerequisites
 
-Required on the host:
+Install these on the host:
 
 ```text
 docker
@@ -80,23 +65,9 @@ nc
 openssl
 ```
 
-By default, `scripts/build-images.sh` clones the required Fabric-X source
-repositories into `third_party/.build` and builds from pinned refs.
-
-If you are actively developing against local Fabric-X checkouts, place them next
-to this repository:
-
-```text
-../fabric-x
-../fabric-x-orderer
-../fabric-x-committer
-```
-
-Then build with:
-
-```bash
-USE_LOCAL_REPOS=1 ./scripts/build-images.sh
-```
+By default, `scripts/build-images.sh` clones pinned Fabric-X sources into
+`third_party/.build`. To build from sibling local checkouts instead, run it with
+`USE_LOCAL_REPOS=1`.
 
 ## Fresh Setup
 
@@ -109,25 +80,9 @@ From the repository root:
 ./scripts/create-namespace.sh
 ```
 
-What those commands do:
+The default namespace is `0` with policy `OR('org-0.member')`.
 
-- `build-images.sh` builds `cryptogen`, `configtxgen`, `fxconfig`, the Arma
-  all-in-one orderer image, and the committer test-node image.
-- `generate-artifacts.sh` creates crypto material, Arma configs, channel config,
-  and clears old runtime state.
-- `start-network.sh` starts the real Fabric-X orderer and committer containers.
-- `create-namespace.sh` creates namespace `0` with the default policy
-  `OR('org-0.member')`.
-
-Optional lower-level sanity check, before involving chaincode:
-
-```bash
-./scripts/smoke.sh
-```
-
-That submits a hard-coded Fabric-X RW set through `cmd/rws-smoke`.
-
-## Build V1 Prototype Binaries
+## Build Prototype Binaries
 
 ```bash
 cd chaincode_helper
@@ -142,120 +97,72 @@ cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
-## Run Tests
+## Start V1 Services
 
-Run tests against source packages, not `go test ./...` from the Project root
-after the network has started. The running network creates Docker-owned
-directories under `storage/`, and the Go tool recursively walks those
-directories before applying package filtering.
+Use three terminals from the repository root.
 
-Use:
-
-```bash
-go test ./cmd/...
-
-cd chaincode_helper
-go test ./...
-
-cd ../sample_external_chaincode
-go test ./...
-
-cd ..
-```
-
-## Run The V1 Services
-
-Use three terminals. Start each terminal from the repository root.
-
-Terminal 1, external chaincode service:
+Terminal 1:
 
 ```bash
 cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Terminal 2, helper:
+Terminal 2:
 
 ```bash
 cd chaincode_helper
 ./bin/helper -c sampleconfig/helper.yaml
 ```
 
-Terminal 3, orchestrator:
+Terminal 3:
 
 ```bash
 cd chaincode_helper
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
-The configured endpoints are:
-
-```text
-chaincode service: 127.0.0.1:9999
-helper service:    127.0.0.1:9001
-orchestrator:      127.0.0.1:9102
-committer sidecar: 127.0.0.1:4001
-query service:     127.0.0.1:7001
-orderer router:    127.0.0.1:6022
-```
-
-## Run A Real V1 Chaincode Simulation
-
-Use the orchestrator-backed client config. The client uses the Fabric-X SDK to
-create an MSP-signed proposal and sends it to the orchestrator gRPC endpoint.
-The orchestrator then submits a real Fabric-X transaction and waits for
-Notification Service finality.
-
-Run the full V1 compatibility path:
+For demo logs:
 
 ```bash
-cd chaincode_helper
+./bin/helper -c sampleconfig/helper.yaml --log-level DEBUG
+./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
+```
 
+Important endpoints:
+
+```text
+9999  external chaincode service
+9001  helper
+9102  orchestrator
+4001  Notification Service / committer sidecar
+7001  Query Service
+6022  Arma orderer router
+```
+
+## Run The Demo
+
+From `chaincode_helper`:
+
+```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client.yaml \
   '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
 ```
 
-`compatv1` seeds `old-value` and `delete-me` inside the same chaincode
-invocation before applying the final write and delete. No earlier setup
-transaction is required.
-
-The response should be JSON with:
+Expected response fields:
 
 ```text
 "status": 200
 "submitted": true
 "commit_status": "COMMITTED"
-"payload": "... old-value ..."
 "chaincode_event": { "event_name": "log", ... }
 ```
 
-The payload is the chaincode response. It includes the context and shim values
-observed by the chaincode, including:
+`compatv1` is self-contained. It seeds `old-value` and `delete-me` inside the
+same chaincode invocation, so no setup `put` transactions are required.
 
-```text
-args
-string_args
-function
-parameters
-tx_id
-channel_id
-committed_old_value
-committed_delete_old_value
-seed_old_value
-seed_delete_value
-old_value
-after_put_value
-delete_old_value
-after_delete_value
-composite_key
-split_object_type
-split_attributes
-ok_status
-error_status
-```
-
-Verify committed state:
+Verify final state:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client query \
@@ -275,95 +182,64 @@ new-value
 
 The second query should print an empty payload because the key was deleted.
 
-## Inspect Committed Blocks
+## Inspect Blocks
 
-Get current block height and dump recent blocks:
+Dump all current blocks:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -from 0
 ```
 
-Inspect one transaction by ID:
+Dump one transaction:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
-For a successful `compatv1` transaction, block output should show:
+A successful `compatv1` block should show a Fabric-X `MESSAGE` envelope with an
+`applicationpb.Tx`, one endorsement, event metadata, and writes for:
 
 ```text
-Envelope type=MESSAGE/0 channel=channelqc4
-data: applicationpb.Tx namespaces=1 endorsements=1 metadata=2
-event ... name=log payload=...
-read_write key="asset-to-delete" version=... value=<nil>
-read_write key="asset1" version=... value="new-value"
+asset1 -> "new-value"
+asset-to-delete -> <nil>
 ```
 
-The physical block ledger is stored on the host at:
+## Tests
 
-```text
-runtime/committer/ledger/chains/fabric-x-committer/blockfile_000000
-```
-
-That file is binary and may contain many blocks. Use `block-dump` for readable
-inspection.
-
-## Fast Restart
-
-If the Fabric-X network and namespace are already running, only rebuild and
-restart the three V1 processes:
+Run tests from package roots:
 
 ```bash
+go test ./cmd/...
+
 cd chaincode_helper
-go build -o bin/client ./cmd/client
-go build -o bin/helper ./cmd/helper
-go build -o bin/orchestrator ./cmd/orchestrator
+go test ./...
 
 cd ../sample_external_chaincode
-go build -o bin/sample-chaincode ./cmd/server
-
-cd ..
+go test ./...
 ```
 
-Then restart:
-
-```bash
-cd sample_external_chaincode
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
-```
-
-```bash
-cd chaincode_helper
-./bin/helper -c sampleconfig/helper.yaml
-```
-
-```bash
-cd chaincode_helper
-./bin/orchestrator -c sampleconfig/orchestrator.yaml
-```
+Avoid `go test ./...` from the repository root after the network has started,
+because Docker-owned files under `storage/` can confuse recursive package
+discovery.
 
 ## Stop And Clean
 
-Stop Fabric-X containers but keep artifacts and ledger state:
+Stop the Fabric-X containers:
 
 ```bash
 ./scripts/stop-network.sh
 ```
 
-Full cleanup of generated artifacts and runtime state:
+Stop local V1 processes:
+
+```bash
+pkill -f 'sample-chaincode'
+pkill -f '/bin/helper'
+pkill -f '/bin/orchestrator'
+```
+
+Delete generated artifacts and runtime state:
 
 ```bash
 ./scripts/clean.sh
 ```
-
-## Current Scope
-
-Included in V1:
-
-- single Fabric-X namespace: `0`
-- single organization policy by default: `OR('org-0.member')`
-- one helper and one orchestrator
-- public point reads/writes/deletes
-- one external Go chaincode service
-- Query Service reads
-- Notification Service finality

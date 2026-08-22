@@ -276,17 +276,25 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		inv.CCID.Version = "1.0"
 	}
 
+	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
+		inv.TxID, inv.Channel, inv.CCID.Name, inv.CCID.Version, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.CCID.Name)
 	res, meta, err := executor.Execute(ctx, execCtx, inv)
 	if err != nil {
+		s.logger.Warnf("tx=%s chaincode execution failed: %s", inv.TxID, err)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if meta.QueryView != nil {
 		s.logger.Debugf("tx=%s query-view=%s", inv.TxID, meta.QueryView.Id)
 	}
+	rws := execCtx.Result()
+	s.logger.Infof("tx=%s chaincode execution completed status=%d reads=%d writes=%d payload_bytes=%d event_bytes=%d",
+		inv.TxID, res.Status, len(rws.Reads), len(rws.Writes), len(res.Payload), len(res.Event))
 
+	s.logger.Debugf("tx=%s building Fabric-X endorsement", inv.TxID)
 	end, err := s.builder.Endorse(inv, res)
 	if err != nil {
+		s.logger.Warnf("tx=%s endorsement build failed: %s", inv.TxID, err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("endorsement: %s", err.Error()))
 	}
 
@@ -306,6 +314,13 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	)
 
 	return end, nil
+}
+
+func argString(args [][]byte, index int) string {
+	if index < 0 || index >= len(args) {
+		return ""
+	}
+	return string(args[index])
 }
 
 // WaitForReady implements connection.Service. There is no local catch-up state,

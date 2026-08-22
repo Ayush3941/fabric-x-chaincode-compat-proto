@@ -84,6 +84,7 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create shim connector: %w", err)
 	}
+	shimConnector.SetLogger(flogging.MustGetLogger("shim"))
 	executors := map[string]api.Executor{
 		cfg.Namespace: NewChaincodeServiceExecutor(shimConnector),
 	}

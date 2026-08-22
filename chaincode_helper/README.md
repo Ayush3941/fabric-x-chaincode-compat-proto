@@ -84,6 +84,19 @@ cd chaincode_helper
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
+For proof-oriented logs during a demo, run helper and orchestrator with debug
+logging:
+
+```bash
+./bin/helper -c sampleconfig/helper.yaml --log-level DEBUG
+./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
+```
+
+At INFO level the logs show proposal receipt, helper execution, Fabric-X
+submission, and finality. At DEBUG level they also show the CCAAS shim
+GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
+steps.
+
 Submit a real V1 invoke:
 
 ```bash

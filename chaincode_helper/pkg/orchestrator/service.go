@@ -143,6 +143,8 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
+	logger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helpers=%d finality_timeout=%s",
+		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), len(cfg.Helpers), cfg.FinalityTimeout)
 	return &Service{
 		cfg:       cfg,
 		signer:    signer,
@@ -211,7 +213,7 @@ func (s *Service) Close() error {
 	return errors.Join(errs...)
 }
 
-// ProcessProposal accepts an MSP-signed Fabric proposal from the orchestrator
+// ProcessProposal accepts an MSP-signed Fabric proposal from the client
 // client. The first proposal argument is an orchestrator operation marker; it is
 // stripped before the helper invokes chaincode.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
@@ -227,6 +229,8 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
+		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
 
 	res, err := s.Execute(ctx, req, submit)
 	if err != nil {
@@ -260,6 +264,8 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return InvocationResponse{}, errors.New("function is required")
 	}
 
+	s.logger.Infof("orchestrator calling helper operation=%s namespace=%s fn=%s args=%d",
+		operationName(submit), namespace, req.Function, len(req.Args))
 	end, err := s.endorsers.ExecuteTransaction(ctx, namespace, "1.0", args)
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
@@ -274,7 +280,10 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 
 	resp := end.Responses[0].Response
 	out := responseFromPeer(txID, resp)
+	s.logger.Infof("tx=%s helper response status=%d payload_bytes=%d submit=%t",
+		txID, resp.Status, len(resp.Payload), submit)
 	if resp.Status < 200 || resp.Status >= 400 {
+		s.logger.Infof("tx=%s chaincode returned non-success status=%d message=%q", txID, resp.Status, resp.Message)
 		return out, nil
 	}
 	if !submit {
@@ -291,6 +300,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		defer finality.Cancel()
 	}
 
+	s.logger.Infof("tx=%s submitting endorsed Fabric-X transaction", txID)
 	if err := s.submitter.Submit(ctx, end); err != nil {
 		return out, fmt.Errorf("submit failed: %w", err)
 	}
@@ -306,6 +316,8 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		out.CommitStatus = status.Status.String()
 		out.BlockNum = status.Ref.GetBlockNum()
 		out.TxNum = status.Ref.GetTxNum()
+		s.logger.Infof("tx=%s finality status=%s block=%d txnum=%d",
+			txID, out.CommitStatus, out.BlockNum, out.TxNum)
 		if status.Status == committerpb.Status_COMMITTED {
 			out.ChaincodeEvent = eventFromEndorsement(end, txID)
 		}
@@ -361,6 +373,7 @@ func (s *Service) subscribeFinality(ctx context.Context, txID string) (*finality
 		cancel()
 		return nil, fmt.Errorf("send tx status subscription: %w", err)
 	}
+	s.logger.Debugf("tx=%s notification subscription opened timeout=%s", txID, timeout)
 
 	result := make(chan finalityResult, 1)
 	go waitForNotification(notifyCtx, stream, txID, result)
@@ -514,4 +527,18 @@ func txIDFromEndorsement(end sdk.Endorsement) (string, error) {
 		return "", fmt.Errorf("unmarshal channel header: %w", err)
 	}
 	return chdr.TxId, nil
+}
+
+func operationName(submit bool) string {
+	if submit {
+		return "invoke"
+	}
+	return "query"
+}
+
+func protocolOrDefault(protocol string) string {
+	if protocol == "" {
+		return "fabric-x"
+	}
+	return protocol
 }
