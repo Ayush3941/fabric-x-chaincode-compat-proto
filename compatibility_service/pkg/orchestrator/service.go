@@ -59,9 +59,10 @@ type Config struct {
 // InvocationRequest is the orchestrator's internal normalized request after a
 // signed proposal has been parsed.
 type InvocationRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Function  string   `json:"function,omitempty"`
-	Args      []string `json:"args,omitempty"`
+	ClientTxID string   `json:"-"`
+	Namespace  string   `json:"namespace,omitempty"`
+	Function   string   `json:"function,omitempty"`
+	Args       []string `json:"args,omitempty"`
 }
 
 // InvocationResponse is returned by query and invoke.
@@ -98,12 +99,31 @@ type Service struct {
 	logger    sdk.Logger
 }
 
-// New constructs the orchestrator, its in-process helper path, and the
-// Fabric-X orderer/notification clients.
+// Loggers separates the deployable service logs by logical component.
+type Loggers struct {
+	Orchestrator sdk.Logger
+	Helper       sdk.Logger
+	Shim         sdk.Logger
+}
+
+// New constructs the orchestrator with one logger for all logical components.
 func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
+	return NewWithLoggers(ctx, cfg, Loggers{
+		Orchestrator: logger,
+		Helper:       logger,
+		Shim:         logger,
+	})
+}
+
+// NewWithLoggers constructs the orchestrator, its in-process helper path, and
+// the Fabric-X orderer/notification clients.
+func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	orchestratorLogger := loggerOrNoop(loggers.Orchestrator)
+	helperLogger := loggerOrNoop(loggers.Helper)
+	shimLogger := loggerOrNoop(loggers.Shim)
 
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
@@ -114,7 +134,7 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create shim connector: %w", err)
 	}
-	shimConnector.SetLogger(logger)
+	shimConnector.SetLogger(shimLogger)
 
 	helperCfg := helper.ServiceConfig{
 		ChannelID:    cfg.ChannelID,
@@ -123,7 +143,7 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 	}
 	helper, err := helper.NewWithSigner(helperCfg, signer, map[string]helper.Executor{
 		cfg.Namespace: helper.NewChaincodeServiceExecutor(shimConnector),
-	}, logger)
+	}, helperLogger)
 	if err != nil {
 		return nil, fmt.Errorf("create internal helper: %w", err)
 	}
@@ -132,9 +152,9 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 	var submitter *network.FabricSubmitter
 	switch cfg.Protocol {
 	case "fabric":
-		submitter, err = nfab.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, logger)
+		submitter, err = nfab.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
 	case "fabric-x", "":
-		submitter, err = nfabx.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, logger)
+		submitter, err = nfabx.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
 	default:
 		return nil, fmt.Errorf("unknown protocol %q: must be \"fabric\" or \"fabric-x\"", cfg.Protocol)
 	}
@@ -155,7 +175,7 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	logger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process finality_timeout=%s",
+	orchestratorLogger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process finality_timeout=%s",
 		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.FinalityTimeout)
 	return &Service{
 		cfg:       cfg,
@@ -164,7 +184,7 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		submitter: submitter,
 		notifier:  notifier,
 		notify:    notify,
-		logger:    logger,
+		logger:    orchestratorLogger,
 	}, nil
 }
 
@@ -228,8 +248,8 @@ func (s *Service) Close() error {
 	return errors.Join(errs...)
 }
 
-// ProcessProposal accepts an MSP-signed Fabric proposal from the client
-// client. The first proposal argument is an orchestrator operation marker; it is
+// ProcessProposal accepts an MSP-signed Fabric proposal from the client. The
+// first proposal argument is an orchestrator operation marker; it is
 // stripped before the helper invokes chaincode.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
@@ -244,6 +264,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	req.ClientTxID = inv.TxID
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
 		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
 
@@ -288,6 +309,9 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	txID, err := txIDFromEndorsement(end)
 	if err != nil {
 		return InvocationResponse{}, err
+	}
+	if req.ClientTxID != "" && req.ClientTxID != txID {
+		s.logger.Infof("client_tx=%s helper_tx=%s helper execution transaction id selected", req.ClientTxID, txID)
 	}
 	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
 		return InvocationResponse{}, errors.New("helper returned no proposal response")
@@ -349,13 +373,24 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 	if err != nil {
 		return sdk.Endorsement{}, fmt.Errorf("create helper proposal: %w", err)
 	}
+	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
+	if err != nil {
+		return sdk.Endorsement{}, fmt.Errorf("unmarshal helper proposal: %w", err)
+	}
+	txID, err := txIDFromProposal(proposal)
+	if err != nil {
+		return sdk.Endorsement{}, err
+	}
+	s.logger.Infof("tx=%s helper proposal created namespace=%s version=%s fn=%s args=%d",
+		txID, namespace, nsVersion, argString(args, 0), len(args)-1)
+
 	resp, err := s.helper.ProcessProposal(ctx, prop)
 	if err != nil {
 		return sdk.Endorsement{}, fmt.Errorf("helper process proposal: %w", err)
 	}
-	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
-	if err != nil {
-		return sdk.Endorsement{}, fmt.Errorf("unmarshal helper proposal: %w", err)
+	if resp != nil && resp.Response != nil {
+		s.logger.Infof("tx=%s helper proposal response received status=%d chaincode_payload_bytes=%d proposal_payload_bytes=%d endorsement_present=%t",
+			txID, resp.Response.Status, len(resp.Response.Payload), len(resp.Payload), resp.Endorsement != nil)
 	}
 	return sdk.Endorsement{Proposal: proposal, Responses: []*peer.ProposalResponse{resp}}, nil
 }
@@ -552,7 +587,14 @@ func txIDFromEndorsement(end sdk.Endorsement) (string, error) {
 	if end.Proposal == nil {
 		return "", errors.New("endorsement has no proposal")
 	}
-	hdr, err := protoutil.UnmarshalHeader(end.Proposal.Header)
+	return txIDFromProposal(end.Proposal)
+}
+
+func txIDFromProposal(prop *peer.Proposal) (string, error) {
+	if prop == nil {
+		return "", errors.New("proposal is nil")
+	}
+	hdr, err := protoutil.UnmarshalHeader(prop.Header)
 	if err != nil {
 		return "", fmt.Errorf("unmarshal proposal header: %w", err)
 	}
@@ -561,6 +603,13 @@ func txIDFromEndorsement(end sdk.Endorsement) (string, error) {
 		return "", fmt.Errorf("unmarshal channel header: %w", err)
 	}
 	return chdr.TxId, nil
+}
+
+func argString(args [][]byte, index int) string {
+	if index < 0 || index >= len(args) {
+		return ""
+	}
+	return string(args[index])
 }
 
 func operationName(submit bool) string {
@@ -575,4 +624,11 @@ func protocolOrDefault(protocol string) string {
 		return "fabric-x"
 	}
 	return protocol
+}
+
+func loggerOrNoop(logger sdk.Logger) sdk.Logger {
+	if logger == nil {
+		return sdk.NoOpLogger{}
+	}
+	return logger
 }

@@ -107,18 +107,23 @@ cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Terminal 2:
+Terminal 2, orchestrator with normal foreground logs:
 
 ```bash
 cd compatibility_service
-./bin/orchestrator -c sampleconfig/orchestrator.yaml
-```
-
-For demo logs:
-
-```bash
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
+
+The orchestrator terminal shows the full service-side trace:
+
+```text
+[orchestrator] client proposal, helper call, submit, finality
+[helper] proposal parse, execution result, Fabric-X endorsement
+[shim] CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
+```
+
+Run the client from a third terminal. Keep client logging quiet; `DEBUG` on the
+client mostly prints gRPC internals.
 
 Important endpoints:
 

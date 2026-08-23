@@ -69,23 +69,26 @@ go build -o bin/sample-chaincode ./cmd/server
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Start the orchestrator:
+Start the orchestrator in the foreground:
 
 ```bash
 cd compatibility_service
-./bin/orchestrator -c sampleconfig/orchestrator.yaml
+./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-For proof-oriented logs during a demo, run the orchestrator with debug logging:
+This terminal shows the service-side proof trace:
 
-```bash
-./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
+```text
+[orchestrator] client proposal, helper call, submit, finality
+[helper] proposal parse, execution result, Fabric-X endorsement
+[shim] CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
 ```
 
 At INFO level the logs show proposal receipt, internal helper execution,
 Fabric-X submission, and finality. At DEBUG level they also show the CCAAS shim
 GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
-steps.
+steps. Run the client from another terminal with `FABRIC_LOGGING_SPEC=error`;
+client-side debug output is mostly gRPC internals.
 
 Submit a real V1 invoke:
 

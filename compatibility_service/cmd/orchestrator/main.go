@@ -65,8 +65,11 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 	flogging.Init(logging)
 
-	logger := flogging.MustGetLogger("orchestrator")
-	svc, err := orchestrator.New(cmd.Context(), cfg, logger)
+	svc, err := orchestrator.NewWithLoggers(cmd.Context(), cfg, orchestrator.Loggers{
+		Orchestrator: flogging.MustGetLogger("orchestrator"),
+		Helper:       flogging.MustGetLogger("helper"),
+		Shim:         flogging.MustGetLogger("shim"),
+	})
 	if err != nil {
 		return fmt.Errorf("create orchestrator: %w", err)
 	}

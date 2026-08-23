@@ -298,26 +298,28 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s chaincode execution completed status=%d reads=%d writes=%d payload_bytes=%d event_bytes=%d",
 		inv.TxID, res.Status, len(rws.Reads), len(rws.Writes), len(res.Payload), len(res.Event))
 
-	s.logger.Debugf("tx=%s building Fabric-X endorsement", inv.TxID)
+	s.logger.Infof("tx=%s building Fabric-X endorsement namespace=%s reads=%d writes=%d event_bytes=%d",
+		inv.TxID, inv.CCID.Name, len(rws.Reads), len(rws.Writes), len(res.Event))
 	end, err := s.builder.Endorse(inv, res)
 	if err != nil {
 		s.logger.Warnf("tx=%s endorsement build failed: %s", inv.TxID, err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("endorsement: %s", err.Error()))
 	}
 
-	var payload string
+	payload := "empty"
 	if len(end.Response.Payload) < 512 {
 		payload = string(end.Response.Payload)
 	} else {
 		payload = fmt.Sprintf("(%db)", len(end.Response.Payload))
 	}
-	s.logger.Infof("tx=%s st=%d ns=%s fn=%s args=%d res=%s",
+	s.logger.Infof("tx=%s Fabric-X endorsement built status=%d namespace=%s fn=%s args=%d tx_payload=%s endorsement_present=%t",
 		inv.TxID,
 		end.Response.Status,
 		inv.CCID.Name,
 		string(inv.Args[0]),
 		len(inv.Args)-1,
 		payload,
+		end.Endorsement != nil,
 	)
 
 	return end, nil
