@@ -11,7 +11,9 @@ import (
 	"io"
 	"time"
 
-	"chaincode_helper/pkg/config"
+	"compatibility_service/pkg/config"
+	"compatibility_service/pkg/helper"
+	"compatibility_service/pkg/shim"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-committer/utils/serve"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
@@ -38,19 +40,20 @@ const (
 )
 
 // Config contains the V1 orchestrator wiring. The orchestrator receives a small
-// invocation request, sends a real signed proposal to the helper, and submits
-// the helper's endorsed Fabric-X transaction to the orderer.
+// invocation request, executes the internal helper path, and submits the
+// endorsed Fabric-X transaction to the orderer.
 type Config struct {
-	ChannelID       string                 `mapstructure:"channel-id"`
-	Namespace       string                 `mapstructure:"namespace"`
-	Protocol        string                 `mapstructure:"protocol"`
-	Server          *serve.ServerConfig    `mapstructure:"server"`
-	Identity        *config.IdentityConfig `mapstructure:"identity"`
-	Helpers         []config.ClientConfig  `mapstructure:"helpers"`
-	Orderer         *config.ClientConfig   `mapstructure:"orderer"`
-	NotificationSvc *config.ClientConfig   `mapstructure:"notification-service"`
-	WaitAfterSubmit time.Duration          `mapstructure:"wait-after-submit"`
-	FinalityTimeout time.Duration          `mapstructure:"finality-timeout"`
+	ChannelID       string                        `mapstructure:"channel-id"`
+	Namespace       string                        `mapstructure:"namespace"`
+	Protocol        string                        `mapstructure:"protocol"`
+	Server          *serve.ServerConfig           `mapstructure:"server"`
+	Identity        *config.IdentityConfig        `mapstructure:"identity"`
+	QueryService    config.ClientConfig           `mapstructure:"query-service"`
+	ChaincodeSvc    config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
+	Orderer         *config.ClientConfig          `mapstructure:"orderer"`
+	NotificationSvc *config.ClientConfig          `mapstructure:"notification-service"`
+	WaitAfterSubmit time.Duration                 `mapstructure:"wait-after-submit"`
+	FinalityTimeout time.Duration                 `mapstructure:"finality-timeout"`
 }
 
 // InvocationRequest is the orchestrator's internal normalized request after a
@@ -88,15 +91,15 @@ type ChaincodeEvent struct {
 type Service struct {
 	cfg       Config
 	signer    sdk.Signer
-	endorsers *network.EndorsementClient
+	helper    *helper.Service
 	submitter *network.FabricSubmitter
 	notifier  *network.Peer
 	notify    committerpb.NotifierClient
 	logger    sdk.Logger
 }
 
-// New constructs the orchestrator and dials the helper, orderer, and
-// notification endpoints.
+// New constructs the orchestrator, its in-process helper path, and the
+// Fabric-X orderer/notification clients.
 func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -107,13 +110,22 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		return nil, fmt.Errorf("load identity: %w", err)
 	}
 
-	helperConfs := make([]network.PeerConf, len(cfg.Helpers))
-	for i := range cfg.Helpers {
-		helperConfs[i] = cfg.Helpers[i].ToPeerConf()
-	}
-	endorsers, err := network.NewEndorsementClient(helperConfs, signer, cfg.ChannelID, cfg.Namespace, "1.0")
+	shimConnector, err := shim.NewConnector(shim.Config{Endpoint: cfg.ChaincodeSvc.Address()})
 	if err != nil {
-		return nil, fmt.Errorf("create helper client: %w", err)
+		return nil, fmt.Errorf("create shim connector: %w", err)
+	}
+	shimConnector.SetLogger(logger)
+
+	helperCfg := helper.ServiceConfig{
+		ChannelID:    cfg.ChannelID,
+		Protocol:     cfg.Protocol,
+		QueryService: cfg.QueryService.ToPeerConf(),
+	}
+	helper, err := helper.NewWithSigner(helperCfg, signer, map[string]helper.Executor{
+		cfg.Namespace: helper.NewChaincodeServiceExecutor(shimConnector),
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("create internal helper: %w", err)
 	}
 
 	ordererConfs := []network.OrdererConf{cfg.Orderer.ToOrdererConf()}
@@ -127,7 +139,7 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		return nil, fmt.Errorf("unknown protocol %q: must be \"fabric\" or \"fabric-x\"", cfg.Protocol)
 	}
 	if err != nil {
-		endorsers.Close() //nolint:errcheck
+		helper.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create submitter: %w", err)
 	}
 
@@ -137,18 +149,18 @@ func New(ctx context.Context, cfg Config, logger sdk.Logger) (*Service, error) {
 		notifier, err = network.NewPeer(cfg.NotificationSvc.ToPeerConf())
 		if err != nil {
 			submitter.Close() //nolint:errcheck
-			endorsers.Close() //nolint:errcheck
+			helper.Close()    //nolint:errcheck
 			return nil, fmt.Errorf("notification service: %w", err)
 		}
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	logger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helpers=%d finality_timeout=%s",
-		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), len(cfg.Helpers), cfg.FinalityTimeout)
+	logger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process finality_timeout=%s",
+		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.FinalityTimeout)
 	return &Service{
 		cfg:       cfg,
 		signer:    signer,
-		endorsers: endorsers,
+		helper:    helper,
 		submitter: submitter,
 		notifier:  notifier,
 		notify:    notify,
@@ -173,8 +185,11 @@ func (cfg Config) Validate() error {
 	} else if cfg.Server.Endpoint.Empty() {
 		errs = append(errs, errors.New("server.endpoint is required"))
 	}
-	if len(cfg.Helpers) == 0 {
-		errs = append(errs, errors.New("at least one helper is required"))
+	if cfg.QueryService.Endpoint == nil {
+		errs = append(errs, errors.New("query-service.endpoint is required"))
+	}
+	if cfg.ChaincodeSvc.Endpoint == nil {
+		errs = append(errs, errors.New("chaincode-service.endpoint is required"))
 	}
 	if cfg.Orderer == nil || cfg.Orderer.Endpoint == nil {
 		errs = append(errs, errors.New("orderer.endpoint is required"))
@@ -204,8 +219,8 @@ func (s *Service) Close() error {
 	if s.submitter != nil {
 		errs = append(errs, s.submitter.Close())
 	}
-	if s.endorsers != nil {
-		errs = append(errs, s.endorsers.Close())
+	if s.helper != nil {
+		errs = append(errs, s.helper.Close())
 	}
 	if s.notifier != nil {
 		errs = append(errs, s.notifier.Close())
@@ -264,9 +279,9 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return InvocationResponse{}, errors.New("function is required")
 	}
 
-	s.logger.Infof("orchestrator calling helper operation=%s namespace=%s fn=%s args=%d",
+	s.logger.Infof("orchestrator calling in-process helper operation=%s namespace=%s fn=%s args=%d",
 		operationName(submit), namespace, req.Function, len(req.Args))
-	end, err := s.endorsers.ExecuteTransaction(ctx, namespace, "1.0", args)
+	end, err := s.executeHelper(ctx, namespace, "1.0", args)
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
@@ -324,6 +339,25 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	}
 
 	return out, nil
+}
+
+func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte) (sdk.Endorsement, error) {
+	if s.helper == nil {
+		return sdk.Endorsement{}, errors.New("internal helper is not configured")
+	}
+	prop, err := network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
+	if err != nil {
+		return sdk.Endorsement{}, fmt.Errorf("create helper proposal: %w", err)
+	}
+	resp, err := s.helper.ProcessProposal(ctx, prop)
+	if err != nil {
+		return sdk.Endorsement{}, fmt.Errorf("helper process proposal: %w", err)
+	}
+	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
+	if err != nil {
+		return sdk.Endorsement{}, fmt.Errorf("unmarshal helper proposal: %w", err)
+	}
+	return sdk.Endorsement{Proposal: proposal, Responses: []*peer.ProposalResponse{resp}}, nil
 }
 
 type finalitySubscription struct {

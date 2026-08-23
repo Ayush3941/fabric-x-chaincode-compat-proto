@@ -13,16 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"chaincode_helper/pkg/config"
-	"chaincode_helper/pkg/orchestrator"
-	"github.com/hyperledger/fabric-lib-go/common/flogging"
+	"compatibility_service/pkg/config"
+	"compatibility_service/pkg/orchestrator"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
-	nfab "github.com/hyperledger/fabric-x-sdk/network/fabric"
-	nfabx "github.com/hyperledger/fabric-x-sdk/network/fabricx"
 	"github.com/spf13/cobra"
 )
 
@@ -43,14 +39,6 @@ type Config struct {
 
 	// Orchestrator is the V1 client-facing ProcessProposal endpoint.
 	Orchestrator *config.ClientConfig `mapstructure:"orchestrator"`
-
-	// Endorsers is the list of ProcessProposal endpoints, one per organization.
-	// Each entry has its own TLS configuration because helpers run at different orgs.
-	Endorsers []config.ClientConfig `mapstructure:"endorsers"`
-
-	// Orderer is the ordering service endpoint the signed transaction is submitted to.
-	// Required for invoke; ignored by query.
-	Orderer *config.ClientConfig `mapstructure:"orderer"`
 }
 
 // txInput is the JSON format for the transaction argument.
@@ -67,11 +55,10 @@ func main() {
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Client - Example Fabric-X helper client",
-		Long: `Client sends invocations to the orchestrator when configured, or directly
-to helper services for lower-level testing.
+		Long: `Client sends invocations to the orchestrator gRPC endpoint.
 
   query  — endorse only; prints the response payload (read-only)
-  invoke — runs the write path and prints the orchestrator/direct result`,
+  invoke — runs the write path and prints the orchestrator result`,
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
 	cmd.PersistentFlags().String("namespace", "", "Namespace to invoke (overrides config)")
@@ -96,41 +83,14 @@ func newQueryCmd() *cobra.Command {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			if cfg.Orchestrator != nil {
-				res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs)
-				if err != nil {
-					return err
-				}
-				if res.Status < 200 || res.Status >= 400 {
-					return fmt.Errorf("orchestrator returned error status %d: %s", res.Status, res.Message)
-				}
-				cmd.Print(res.Payload)
-				return nil
-			}
-
-			signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
-			if err != nil {
-				return fmt.Errorf("load identity: %w", err)
-			}
-
-			ec, err := buildEndorsementClient(cfg, signer, ns)
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs)
 			if err != nil {
 				return err
 			}
-			defer ec.Close() //nolint:errcheck
-
-			end, err := ec.ExecuteTransaction(cmd.Context(), ns, "1.0", txArgs)
-			if err != nil {
-				return fmt.Errorf("endorsement failed: %w", err)
+			if res.Status < 200 || res.Status >= 400 {
+				return fmt.Errorf("orchestrator returned error status %d: %s", res.Status, res.Message)
 			}
-			if len(end.Responses) == 0 {
-				return nil
-			}
-			resp := end.Responses[0].Response
-			if resp.Status < 200 || resp.Status >= 400 {
-				return fmt.Errorf("endorser returned error status %d: %s", resp.Status, resp.Message)
-			}
-			cmd.Print(string(resp.Payload))
+			cmd.Print(res.Payload)
 			return nil
 		},
 	}
@@ -140,11 +100,10 @@ func newQueryCmd() *cobra.Command {
 func newInvokeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   `invoke '{"function":"...","Args":[]}'`,
-		Short: "Endorse a transaction and submit it to the orderer",
-		Long: `Endorse a transaction and submit it to the orderer.
-When configured with an orchestrator endpoint, this waits for Notification
-Service finality and prints the commit status. In direct-helper mode, it only
-submits to the orderer and does not wait for finality.`,
+		Short: "Invoke through the orchestrator and wait for finality",
+		Long: `Invoke through the orchestrator. The orchestrator calls the embedded
+helper execution path, submits the Fabric-X transaction, waits for Notification
+Service finality, and returns the final status.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, _, txArgs, err := prepare(cmd, args[0])
@@ -152,77 +111,18 @@ submits to the orderer and does not wait for finality.`,
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			if cfg.Orchestrator != nil {
-				res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs)
-				if err != nil {
-					return err
-				}
-				out, err := json.MarshalIndent(res, "", "  ")
-				if err != nil {
-					return err
-				}
-				cmd.Print(string(out))
-				return nil
-			}
-			if cfg.Orderer == nil {
-				return fmt.Errorf("orderer is required for invoke")
-			}
-
-			signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
-			if err != nil {
-				return fmt.Errorf("load identity: %w", err)
-			}
-
-			logger := flogging.MustGetLogger("client")
-
-			ec, err := buildEndorsementClient(cfg, signer, ns)
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs)
 			if err != nil {
 				return err
 			}
-			defer ec.Close() //nolint:errcheck
-
-			ordererConfs := []network.OrdererConf{cfg.Orderer.ToOrdererConf()}
-			waitAfterSubmit, err := cmd.Flags().GetDuration("wait-after-submit")
+			out, err := json.MarshalIndent(res, "", "  ")
 			if err != nil {
 				return err
 			}
-			var submitter *network.FabricSubmitter
-			switch cfg.Protocol {
-			case "fabric":
-				submitter, err = nfab.NewSubmitter(cmd.Context(), ordererConfs, signer, waitAfterSubmit, logger)
-			case "fabric-x", "":
-				submitter, err = nfabx.NewSubmitter(cmd.Context(), ordererConfs, signer, waitAfterSubmit, logger)
-			default:
-				return fmt.Errorf("unknown protocol %q: must be \"fabric\" or \"fabric-x\"", cfg.Protocol)
-			}
-			if err != nil {
-				return fmt.Errorf("create submitter: %w", err)
-			}
-			defer submitter.Close() //nolint:errcheck
-
-			logger.Debugf("sending proposal to %d endorser(s)", len(cfg.Endorsers))
-			end, err := ec.ExecuteTransaction(cmd.Context(), ns, "1.0", txArgs)
-			if err != nil {
-				return fmt.Errorf("endorsement failed: %w", err)
-			}
-			if len(end.Responses) == 0 {
-				return fmt.Errorf("no responses")
-			}
-			resp := end.Responses[0].Response
-			if resp.Status < 200 || resp.Status >= 400 {
-				return fmt.Errorf("endorser returned error status %d: %s", resp.Status, resp.Message)
-			}
-
-			logger.Debugf("submitting transaction to orderer")
-			if err := submitter.Submit(cmd.Context(), end); err != nil {
-				return fmt.Errorf("submit failed: %w", err)
-			}
-			logger.Debugf("transaction submitted")
-			cmd.Print(string(resp.Payload))
+			cmd.Print(string(out))
 			return nil
 		},
 	}
-	cmd.Flags().Duration("wait-after-submit", 2*time.Second, "delay before closing the orderer stream after submit")
 	return cmd
 }
 
@@ -284,20 +184,11 @@ func validate(cfg Config) error {
 	if cfg.Namespace == "" {
 		return fmt.Errorf("namespace is required")
 	}
-	if cfg.Orchestrator != nil {
-		if cfg.Orchestrator.Endpoint == nil {
-			return fmt.Errorf("orchestrator.endpoint is required")
-		}
-		if cfg.Identity == nil {
-			return fmt.Errorf("identity is required for orchestrator transport")
-		}
-		return nil
+	if cfg.Orchestrator == nil || cfg.Orchestrator.Endpoint == nil {
+		return fmt.Errorf("orchestrator.endpoint is required")
 	}
 	if cfg.Identity == nil {
-		return fmt.Errorf("identity is required")
-	}
-	if len(cfg.Endorsers) == 0 {
-		return fmt.Errorf("at least one endorser is required")
+		return fmt.Errorf("identity is required for orchestrator transport")
 	}
 	return nil
 }
@@ -352,18 +243,6 @@ func orchestratorProposalArgs(operation string, txArgs [][]byte) ([][]byte, erro
 		args = append(args, append([]byte(nil), arg...))
 	}
 	return args, nil
-}
-
-func buildEndorsementClient(cfg Config, signer identity.Signer, namespace string) (*network.EndorsementClient, error) {
-	peerConfs := make([]network.PeerConf, len(cfg.Endorsers))
-	for i := range cfg.Endorsers {
-		peerConfs[i] = cfg.Endorsers[i].ToPeerConf()
-	}
-	ec, err := network.NewEndorsementClient(peerConfs, signer, cfg.ChannelID, namespace, "1.0")
-	if err != nil {
-		return nil, fmt.Errorf("create endorsement client: %w", err)
-	}
-	return ec, nil
 }
 
 func namespaceOrDefault(cmd *cobra.Command, cfgNamespace string) string {

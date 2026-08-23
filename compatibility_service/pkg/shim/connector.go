@@ -21,8 +21,8 @@ import (
 const defaultConnectTimeout = 10 * time.Second
 
 // State is the state boundary exposed to the peer-side shim protocol handler.
-// api.ExecutionContext satisfies this interface without pkg/shim importing the
-// API package.
+// helper.ExecutionContext satisfies this interface without pkg/shim importing
+// the helper package.
 type State interface {
 	Namespace() string
 	QueryView() *committerpb.View

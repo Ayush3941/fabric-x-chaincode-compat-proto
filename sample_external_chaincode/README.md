@@ -1,6 +1,6 @@
 # Sample External Chaincode
 
-This is a minimal Go chaincode-as-a-service process for the chaincode helper smoke test.
+This is a minimal Go chaincode-as-a-service process for the compatibility service smoke test.
 
 It listens on `127.0.0.1:9999` with TLS disabled, matching:
 

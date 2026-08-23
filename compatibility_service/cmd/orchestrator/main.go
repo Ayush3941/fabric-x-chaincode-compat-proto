@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"chaincode_helper/pkg/orchestrator"
+	"compatibility_service/pkg/orchestrator"
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
 	"github.com/spf13/cobra"

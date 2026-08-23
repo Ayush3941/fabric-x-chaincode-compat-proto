@@ -1,35 +1,32 @@
-/*
-Copyright IBM Corp. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 
-SPDX-License-Identifier: Apache-2.0
-*/
-
-package main
+package helper
 
 import (
 	"context"
 	"fmt"
 
-	"chaincode_helper/pkg/api"
-	"chaincode_helper/pkg/shim"
+	"compatibility_service/pkg/shim"
 
 	"github.com/hyperledger/fabric-x-sdk/endorsement"
 )
 
-// ChaincodeServiceExecutor links the helper service to the chaincode-as-a-service
-// shim bridge.
+// ChaincodeServiceExecutor links the helper service to the external
+// chaincode-as-a-service shim bridge.
 type ChaincodeServiceExecutor struct {
 	connector *shim.Connector
 }
 
+// NewChaincodeServiceExecutor creates an executor backed by one external
+// chaincode service.
 func NewChaincodeServiceExecutor(connector *shim.Connector) ChaincodeServiceExecutor {
 	return ChaincodeServiceExecutor{connector: connector}
 }
 
-// Execute implements api.Executor.
-func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *api.ExecutionContext, inv endorsement.Invocation) (endorsement.ExecutionResult, api.ExecutionMetadata, error) {
+// Execute implements Executor.
+func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *ExecutionContext, inv endorsement.Invocation) (endorsement.ExecutionResult, ExecutionMetadata, error) {
 	if e.connector == nil {
-		return endorsement.ExecutionResult{}, api.ExecutionMetadata{}, fmt.Errorf("shim connector is not configured")
+		return endorsement.ExecutionResult{}, ExecutionMetadata{}, fmt.Errorf("shim connector is not configured")
 	}
 
 	res, err := e.connector.Execute(ctx, execCtx, shim.Invocation{
@@ -42,7 +39,7 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *api.Exec
 		QueryView: execCtx.QueryView(),
 	})
 	if err != nil {
-		return endorsement.ExecutionResult{}, api.ExecutionMetadata{}, err
+		return endorsement.ExecutionResult{}, ExecutionMetadata{}, err
 	}
 
 	return endorsement.ExecutionResult{
@@ -51,5 +48,5 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *api.Exec
 		Status:  res.Status,
 		Message: res.Message,
 		Payload: res.Payload,
-	}, api.ExecutionMetadata{QueryView: res.QueryView}, nil
+	}, ExecutionMetadata{QueryView: res.QueryView}, nil
 }

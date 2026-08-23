@@ -1,9 +1,10 @@
-# Fabric-X Chaincode Helper
+# Fabric-X Chaincode Compatibility Service
 
-This folder contains the V1 chaincode compatibility helper, orchestrator, and
-test client. It is based on the Fabric-X custom endorser shape, but the executor
-now talks to an external Fabric chaincode-as-a-service process through the real
-Fabric shim message protocol.
+This folder contains the V1 chaincode compatibility orchestrator and test
+client. The orchestrator embeds the helper execution path in the same process.
+That internal helper is based on the Fabric-X custom endorser shape, but the
+executor talks to an external Fabric chaincode-as-a-service process through the
+real Fabric shim message protocol.
 
 The helper is intentionally stateless:
 
@@ -19,8 +20,8 @@ Current V1 flow:
 ```text
 client CLI
 -> orchestrator Fabric-X SDK ProcessProposal gRPC API
--> helper peer.Endorser.ProcessProposal service
--> pkg/api ExecutionContext
+-> internal helper ProcessProposal path
+-> pkg/helper ExecutionContext
 -> pkg/shim CCAAS connector and message handler
 -> external chaincode Invoke
 -> GET_STATE routed to Fabric-X Query Service
@@ -32,14 +33,13 @@ client CLI
 ## Layout
 
 ```text
-cmd/helper/        helper service exposing peer.Endorser.ProcessProposal
 cmd/orchestrator/   client-facing orchestrator and Fabric-X submit/finality path
-cmd/client/        small CLI for query/invoke through the orchestrator
-pkg/api/           ProcessProposal service, ExecutionContext, Query adapter
-pkg/config/        YAML config structures
-pkg/orchestrator/   gRPC ProcessProposal, helper call, submitter, notification wait
-pkg/shim/          CCAAS connector and Fabric ChaincodeMessage handler
-sampleconfig/      configs wired to ../artifacts from the Project network
+cmd/client/         small CLI for query/invoke through the orchestrator
+pkg/helper/         ProcessProposal service, ExecutionContext, Query adapter
+pkg/config/         YAML config structures
+pkg/orchestrator/   gRPC ProcessProposal, internal helper call, submitter, notification wait
+pkg/shim/           CCAAS connector and Fabric ChaincodeMessage handler
+sampleconfig/       configs wired to ../artifacts from the Project network
 ```
 
 ## Build
@@ -47,9 +47,8 @@ sampleconfig/      configs wired to ../artifacts from the Project network
 Commands in this file assume your shell starts from the repository root.
 
 ```bash
-cd chaincode_helper
+cd compatibility_service
 go build -o bin/client ./cmd/client
-go build -o bin/helper ./cmd/helper
 go build -o bin/orchestrator ./cmd/orchestrator
 ```
 
@@ -70,37 +69,28 @@ go build -o bin/sample-chaincode ./cmd/server
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Start the helper:
-
-```bash
-cd chaincode_helper
-./bin/helper -c sampleconfig/helper.yaml
-```
-
 Start the orchestrator:
 
 ```bash
-cd chaincode_helper
+cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
-For proof-oriented logs during a demo, run helper and orchestrator with debug
-logging:
+For proof-oriented logs during a demo, run the orchestrator with debug logging:
 
 ```bash
-./bin/helper -c sampleconfig/helper.yaml --log-level DEBUG
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-At INFO level the logs show proposal receipt, helper execution, Fabric-X
-submission, and finality. At DEBUG level they also show the CCAAS shim
+At INFO level the logs show proposal receipt, internal helper execution,
+Fabric-X submission, and finality. At DEBUG level they also show the CCAAS shim
 GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
 steps.
 
 Submit a real V1 invoke:
 
 ```bash
-cd chaincode_helper
+cd compatibility_service
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client.yaml \
@@ -114,14 +104,14 @@ The final response should include `commit_status: "COMMITTED"`.
 
 ## Important Files
 
-- `pkg/api/service.go`
+- `pkg/helper/service.go`
   - registers `peer.EndorserServer`
   - parses signed proposals
   - owns `ExecutionContext`
   - reads state through Query Service
   - builds Fabric-X endorsements
 
-- `cmd/helper/executor.go`
+- `pkg/helper/executor.go`
   - adapts `endorsement.Invocation` to `pkg/shim.Invocation`
   - converts the shim bridge result into `endorsement.ExecutionResult`
 
@@ -137,7 +127,7 @@ The final response should include `commit_status: "COMMITTED"`.
 
 - `pkg/orchestrator/service.go`
   - accepts Fabric-X SDK signed proposals over gRPC
-  - calls the helper
+  - calls the in-process helper path
   - submits Fabric-X transactions
   - waits on Notification Service and returns finality
 

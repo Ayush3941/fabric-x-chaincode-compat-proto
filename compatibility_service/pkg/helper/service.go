@@ -4,7 +4,7 @@ Copyright IBM Corp. All Rights Reserved.
 SPDX-License-Identifier: Apache-2.0
 */
 
-package api
+package helper
 
 import (
 	"context"
@@ -213,7 +213,7 @@ func New(cfg ServiceConfig, mspDir, mspID string, executors map[string]Executor,
 // NewWithSigner creates a new Service with an already-constructed signer.
 func NewWithSigner(cfg ServiceConfig, signer sdk.Signer, executors map[string]Executor, logger sdk.Logger) (*Service, error) {
 	if cfg.Protocol != "" && cfg.Protocol != "fabric-x" {
-		return nil, fmt.Errorf("protocol %q is not supported by stateless chaincode helper", cfg.Protocol)
+		return nil, fmt.Errorf("protocol %q is not supported by stateless helper", cfg.Protocol)
 	}
 
 	queryPeer, err := network.NewPeer(cfg.QueryService)
@@ -231,7 +231,7 @@ func NewWithSigner(cfg ServiceConfig, signer sdk.Signer, executors map[string]Ex
 		logger:      logger,
 	}
 
-	logger.Infof("stateless chaincode helper initialized")
+	logger.Infof("stateless helper initialized")
 	return s, nil
 }
 
@@ -249,8 +249,15 @@ func (s *Service) Run(ctx context.Context) error {
 	s.logger.Infof("stateless helper running")
 	<-ctx.Done()
 	s.logger.Infof("stopping stateless helper")
+	return s.Close()
+}
+
+// Close releases helper-owned outbound resources.
+func (s *Service) Close() error {
 	if s.queryPeer != nil {
-		return s.queryPeer.Close()
+		err := s.queryPeer.Close()
+		s.queryPeer = nil
+		return err
 	}
 	return nil
 }

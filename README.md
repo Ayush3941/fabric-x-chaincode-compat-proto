@@ -8,7 +8,7 @@ The V1 flow is:
 ```text
 client CLI
 -> orchestrator gRPC endpoint
--> helper gRPC endpoint
+-> internal helper execution path
 -> external Fabric chaincode-as-a-service
 -> Fabric-X Query Service for reads
 -> local read/write capture
@@ -37,19 +37,19 @@ payload, but the committed event name is the SDK default `log`.
 ## Repository Layout
 
 ```text
-chaincode_helper/          helper, orchestrator, client CLI
-sample_external_chaincode/ sample external Go chaincode service
-cmd/block-dump/            readable block inspection tool
-cmd/rws-smoke/             lower-level Fabric-X RW-set smoke client
-scripts/                   build, setup, start, stop helpers
-fxconfig/                  namespace setup config template
-networkconfig/             crypto and channel config inputs
-committerconfig/           Fabric-X committer container configs
-ordererconfig/             Arma orderer config templates
-artifacts/                 generated crypto/config artifacts, ignored
-runtime/                   logs and committer ledger, ignored
-storage/                   Arma runtime storage, ignored
-bin/                       generated Fabric-X tools, ignored
+compatibility_service/       orchestrator, internal helper packages, client CLI
+sample_external_chaincode/   sample external Go chaincode service
+cmd/block-dump/              readable block inspection tool
+cmd/rws-smoke/               lower-level Fabric-X RW-set smoke client
+scripts/                     build, setup, start, stop helpers
+fxconfig/                    namespace setup config template
+networkconfig/               crypto and channel config inputs
+committerconfig/             Fabric-X committer container configs
+ordererconfig/               Arma orderer config templates
+artifacts/                   generated crypto/config artifacts, ignored
+runtime/                     logs and committer ledger, ignored
+storage/                     Arma runtime storage, ignored
+bin/                         generated Fabric-X tools, ignored
 ```
 
 ## Prerequisites
@@ -85,9 +85,8 @@ The default namespace is `0` with policy `OR('org-0.member')`.
 ## Build Prototype Binaries
 
 ```bash
-cd chaincode_helper
+cd compatibility_service
 go build -o bin/client ./cmd/client
-go build -o bin/helper ./cmd/helper
 go build -o bin/orchestrator ./cmd/orchestrator
 
 cd ../sample_external_chaincode
@@ -99,7 +98,7 @@ go build -o bin/block-dump ./cmd/block-dump
 
 ## Start V1 Services
 
-Use three terminals from the repository root.
+Use two terminals from the repository root.
 
 Terminal 1:
 
@@ -111,21 +110,13 @@ cd sample_external_chaincode
 Terminal 2:
 
 ```bash
-cd chaincode_helper
-./bin/helper -c sampleconfig/helper.yaml
-```
-
-Terminal 3:
-
-```bash
-cd chaincode_helper
+cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml
 ```
 
 For demo logs:
 
 ```bash
-./bin/helper -c sampleconfig/helper.yaml --log-level DEBUG
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
@@ -133,8 +124,7 @@ Important endpoints:
 
 ```text
 9999  external chaincode service
-9001  helper
-9102  orchestrator
+9102  orchestrator, with internal helper execution
 4001  Notification Service / committer sidecar
 7001  Query Service
 6022  Arma orderer router
@@ -142,7 +132,7 @@ Important endpoints:
 
 ## Run The Demo
 
-From `chaincode_helper`:
+From `compatibility_service`:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
@@ -211,7 +201,7 @@ Run tests from package roots:
 ```bash
 go test ./cmd/...
 
-cd chaincode_helper
+cd compatibility_service
 go test ./...
 
 cd ../sample_external_chaincode
@@ -234,7 +224,6 @@ Stop local V1 processes:
 
 ```bash
 pkill -f 'sample-chaincode'
-pkill -f '/bin/helper'
 pkill -f '/bin/orchestrator'
 ```
 

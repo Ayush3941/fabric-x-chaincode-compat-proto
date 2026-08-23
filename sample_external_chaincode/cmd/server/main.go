@@ -11,7 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/hyperledger/fabric-chaincode-go/v2/shim"
 	pb "github.com/hyperledger/fabric-protos-go-apiv2/peer"
@@ -204,6 +206,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "sample external chaincode failed: %s\n", err)
 		os.Exit(1)
 	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
 }
 
 func getenv(key, fallback string) string {

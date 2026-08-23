@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-module chaincode_helper
+module compatibility_service
 
 go 1.26.5
 
