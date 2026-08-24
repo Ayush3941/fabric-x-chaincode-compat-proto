@@ -4,6 +4,7 @@ channel-id: channelqc4
 namespace: "0"
 protocol: fabric-x
 wait-after-submit: 0s
+request-timeout: 45s
 finality-timeout: 20s
 
 server:

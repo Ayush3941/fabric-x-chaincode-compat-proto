@@ -22,7 +22,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Config holds all configuration for the helper client.
+// Config holds all configuration for the client.
 type Config struct {
 	// ChannelID is the channel to submit to.
 	ChannelID string `mapstructure:"channel-id"`

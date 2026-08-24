@@ -84,6 +84,10 @@ This terminal shows the service-side proof trace:
 [shim] CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
 ```
 
+`sampleconfig/orchestrator.yaml` sets `request-timeout: 45s`. That deadline
+covers the whole orchestrator request and must be greater than or equal to
+`finality-timeout`.
+
 At INFO level the logs show proposal receipt, internal helper execution,
 Fabric-X submission, and finality. At DEBUG level they also show the CCAAS shim
 GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
@@ -104,6 +108,23 @@ FABRIC_LOGGING_SPEC=error ./bin/client invoke \
 invocation, so no setup `put` transactions are required.
 
 The final response should include `commit_status: "COMMITTED"`.
+
+To check the current idempotency prototype, run the same `compatv2` invoke
+twice:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+```
+
+The second response should reuse the same `tx_id` and `block_num` and include
+`"idempotent_replay": true`. The current store is in-memory and is reset when
+the orchestrator restarts.
 
 ## Important Files
 

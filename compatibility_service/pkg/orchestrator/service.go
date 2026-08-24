@@ -4,7 +4,10 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,30 +56,36 @@ type Config struct {
 	Orderer         *config.ClientConfig          `mapstructure:"orderer"`
 	NotificationSvc *config.ClientConfig          `mapstructure:"notification-service"`
 	WaitAfterSubmit time.Duration                 `mapstructure:"wait-after-submit"`
+	RequestTimeout  time.Duration                 `mapstructure:"request-timeout"`
 	FinalityTimeout time.Duration                 `mapstructure:"finality-timeout"`
 }
 
 // InvocationRequest is the orchestrator's internal normalized request after a
 // signed proposal has been parsed.
 type InvocationRequest struct {
-	ClientTxID string   `json:"-"`
-	Namespace  string   `json:"namespace,omitempty"`
-	Function   string   `json:"function,omitempty"`
-	Args       []string `json:"args,omitempty"`
+	ClientTxID     string   `json:"-"`
+	ClientCreator  []byte   `json:"-"`
+	IdempotencyKey string   `json:"-"`
+	RequestDigest  string   `json:"-"`
+	Namespace      string   `json:"namespace,omitempty"`
+	Function       string   `json:"function,omitempty"`
+	Args           []string `json:"args,omitempty"`
 }
 
 // InvocationResponse is returned by query and invoke.
 type InvocationResponse struct {
-	TxID           string          `json:"tx_id,omitempty"`
-	Status         int32           `json:"status"`
-	Message        string          `json:"message,omitempty"`
-	Payload        string          `json:"payload,omitempty"`
-	PayloadBase64  string          `json:"payload_base64,omitempty"`
-	Submitted      bool            `json:"submitted"`
-	CommitStatus   string          `json:"commit_status,omitempty"`
-	BlockNum       uint64          `json:"block_num,omitempty"`
-	TxNum          uint32          `json:"tx_num,omitempty"`
-	ChaincodeEvent *ChaincodeEvent `json:"chaincode_event,omitempty"`
+	TxID             string          `json:"tx_id,omitempty"`
+	Status           int32           `json:"status"`
+	Message          string          `json:"message,omitempty"`
+	Payload          string          `json:"payload,omitempty"`
+	PayloadBase64    string          `json:"payload_base64,omitempty"`
+	Submitted        bool            `json:"submitted"`
+	CommitStatus     string          `json:"commit_status,omitempty"`
+	BlockNum         uint64          `json:"block_num,omitempty"`
+	TxNum            uint32          `json:"tx_num,omitempty"`
+	IdempotencyKey   string          `json:"idempotency_key,omitempty"`
+	IdempotentReplay bool            `json:"idempotent_replay,omitempty"`
+	ChaincodeEvent   *ChaincodeEvent `json:"chaincode_event,omitempty"`
 }
 
 // ChaincodeEvent is the client-facing committed event shape.
@@ -90,13 +99,14 @@ type ChaincodeEvent struct {
 
 // Service is the orchestrator process.
 type Service struct {
-	cfg       Config
-	signer    sdk.Signer
-	helper    *helper.Service
-	submitter *network.FabricSubmitter
-	notifier  *network.Peer
-	notify    committerpb.NotifierClient
-	logger    sdk.Logger
+	cfg         Config
+	signer      sdk.Signer
+	helper      *helper.Service
+	submitter   *network.FabricSubmitter
+	notifier    *network.Peer
+	notify      committerpb.NotifierClient
+	idempotency *idempotencyStore
+	logger      sdk.Logger
 }
 
 // Loggers separates the deployable service logs by logical component.
@@ -175,16 +185,17 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	orchestratorLogger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process finality_timeout=%s",
-		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.FinalityTimeout)
+	orchestratorLogger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
+		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
 	return &Service{
-		cfg:       cfg,
-		signer:    signer,
-		helper:    helper,
-		submitter: submitter,
-		notifier:  notifier,
-		notify:    notify,
-		logger:    orchestratorLogger,
+		cfg:         cfg,
+		signer:      signer,
+		helper:      helper,
+		submitter:   submitter,
+		notifier:    notifier,
+		notify:      notify,
+		idempotency: newIdempotencyStore(),
+		logger:      orchestratorLogger,
 	}, nil
 }
 
@@ -217,7 +228,30 @@ func (cfg Config) Validate() error {
 	if cfg.NotificationSvc == nil || cfg.NotificationSvc.Endpoint == nil {
 		errs = append(errs, errors.New("notification-service.endpoint is required"))
 	}
+	if cfg.RequestTimeout < 0 {
+		errs = append(errs, errors.New("request-timeout must not be negative"))
+	}
+	if cfg.FinalityTimeout < 0 {
+		errs = append(errs, errors.New("finality-timeout must not be negative"))
+	}
+	if cfg.RequestTimeout >= 0 && cfg.FinalityTimeout >= 0 && cfg.requestTimeout() < cfg.finalityTimeout() {
+		errs = append(errs, errors.New("request-timeout must be greater than or equal to finality-timeout"))
+	}
 	return errors.Join(errs...)
+}
+
+func (cfg Config) requestTimeout() time.Duration {
+	if cfg.RequestTimeout > 0 {
+		return cfg.RequestTimeout
+	}
+	return 60 * time.Second
+}
+
+func (cfg Config) finalityTimeout() time.Duration {
+	if cfg.FinalityTimeout > 0 {
+		return cfg.FinalityTimeout
+	}
+	return 30 * time.Second
 }
 
 // Run starts the orchestrator Fabric ProcessProposal gRPC API.
@@ -265,11 +299,24 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	req.ClientTxID = inv.TxID
+	req.ClientCreator = append([]byte(nil), inv.Creator...)
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
 		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
 
-	res, err := s.Execute(ctx, req, submit)
+	requestTimeout := s.cfg.requestTimeout()
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	s.logger.Debugf("tx=%s request deadline started timeout=%s", inv.TxID, requestTimeout)
+
+	res, err := s.Execute(requestCtx, req, submit)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Warnf("tx=%s request deadline exceeded timeout=%s", inv.TxID, requestTimeout)
+			return nil, status.Error(codes.DeadlineExceeded, "orchestrator request deadline exceeded")
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, status.Error(codes.Canceled, "orchestrator request canceled")
+		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -299,7 +346,35 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	if len(args) == 0 {
 		return InvocationResponse{}, errors.New("function is required")
 	}
+	if submit {
+		req.IdempotencyKey, req.RequestDigest = idempotencyIdentity(s.cfg.ChannelID, namespace, req, submit)
+		record, owner, err := s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
+		if err != nil {
+			return InvocationResponse{}, err
+		}
+		if !owner {
+			s.logger.Infof("idempotency_key=%s duplicate request detected; waiting for stored result", req.IdempotencyKey)
+			out, err := s.idempotency.wait(ctx, record)
+			out.IdempotentReplay = true
+			return out, err
+		}
 
+		out, err := s.executeFresh(ctx, req, submit, namespace, args, record)
+		s.idempotency.complete(record, out, err)
+		return out, err
+	}
+
+	return s.executeFresh(ctx, req, submit, namespace, args, nil)
+}
+
+func (s *Service) executeFresh(
+	ctx context.Context,
+	req InvocationRequest,
+	submit bool,
+	namespace string,
+	args [][]byte,
+	record *idempotencyRecord,
+) (InvocationResponse, error) {
 	s.logger.Infof("orchestrator calling in-process helper operation=%s namespace=%s fn=%s args=%d",
 		operationName(submit), namespace, req.Function, len(req.Args))
 	end, err := s.executeHelper(ctx, namespace, "1.0", args)
@@ -313,12 +388,16 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	if req.ClientTxID != "" && req.ClientTxID != txID {
 		s.logger.Infof("client_tx=%s helper_tx=%s helper execution transaction id selected", req.ClientTxID, txID)
 	}
+	if record != nil {
+		s.idempotency.markExecuted(record, txID, end)
+	}
 	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
 		return InvocationResponse{}, errors.New("helper returned no proposal response")
 	}
 
 	resp := end.Responses[0].Response
 	out := responseFromPeer(txID, resp)
+	out.IdempotencyKey = req.IdempotencyKey
 	s.logger.Infof("tx=%s helper response status=%d payload_bytes=%d submit=%t",
 		txID, resp.Status, len(resp.Payload), submit)
 	if resp.Status < 200 || resp.Status >= 400 {
@@ -344,6 +423,9 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return out, fmt.Errorf("submit failed: %w", err)
 	}
 	out.Submitted = true
+	if record != nil {
+		s.idempotency.markSubmitted(record, out)
+	}
 	s.logger.Infof("tx=%s submitted", txID)
 
 	status, err := finality.Wait()
@@ -426,7 +508,7 @@ func (s *Service) subscribeFinality(ctx context.Context, txID string) (*finality
 
 	timeout := s.cfg.FinalityTimeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = s.cfg.finalityTimeout()
 	}
 
 	notifyCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -617,6 +699,36 @@ func operationName(submit bool) string {
 		return "invoke"
 	}
 	return "query"
+}
+
+func idempotencyIdentity(channel, namespace string, req InvocationRequest, submit bool) (string, string) {
+	digest := requestDigest(channel, namespace, req, submit)
+	return digest, digest
+}
+
+func requestDigest(channel, namespace string, req InvocationRequest, submit bool) string {
+	h := sha256.New()
+	writeDigestString(h, "v1")
+	writeDigestString(h, operationName(submit))
+	writeDigestString(h, channel)
+	writeDigestString(h, namespace)
+	writeDigestString(h, req.Function)
+	writeDigestBytes(h, req.ClientCreator)
+	for _, arg := range req.Args {
+		writeDigestString(h, arg)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func writeDigestString(h interface{ Write([]byte) (int, error) }, value string) {
+	writeDigestBytes(h, []byte(value))
+}
+
+func writeDigestBytes(h interface{ Write([]byte) (int, error) }, value []byte) {
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
 }
 
 func protocolOrDefault(protocol string) string {

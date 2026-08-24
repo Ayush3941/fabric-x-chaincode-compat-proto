@@ -122,6 +122,10 @@ The orchestrator terminal shows the full service-side trace:
 [shim] CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
 ```
 
+`sampleconfig/orchestrator.yaml` sets `request-timeout: 45s`. That is the full
+Gateway-style request deadline around helper execution, submit, and finality.
+It must be greater than or equal to `finality-timeout`.
+
 Run the client from a third terminal. Keep client logging quiet; `DEBUG` on the
 client mostly prints gRPC internals.
 
@@ -156,6 +160,22 @@ Expected response fields:
 
 `compatv1` is self-contained. It seeds `old-value` and `delete-me` inside the
 same chaincode invocation, so no setup `put` transactions are required.
+
+`compatv2` currently has the same chaincode behavior plus an orchestrator
+idempotency check. Two identical invokes from the same client identity return the
+same helper transaction result; the second response includes
+`"idempotent_replay": true` and does not submit another Fabric-X transaction.
+The current store is in-memory and is reset when the orchestrator restarts.
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+```
 
 Verify final state:
 
