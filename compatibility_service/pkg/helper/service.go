@@ -41,6 +41,22 @@ type Service struct {
 	logger      sdk.Logger
 }
 
+type clientCreatorContextKey struct{}
+
+// WithClientCreator carries the original client proposal creator through the
+// in-process helper path so chaincode identity APIs see the invoking client.
+func WithClientCreator(ctx context.Context, creator []byte) context.Context {
+	if len(creator) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, clientCreatorContextKey{}, append([]byte(nil), creator...))
+}
+
+func clientCreatorFromContext(ctx context.Context) []byte {
+	creator, _ := ctx.Value(clientCreatorContextKey{}).([]byte)
+	return append([]byte(nil), creator...)
+}
+
 // Executor is the application execution boundary. For this prototype, the
 // executor is expected to become the peer-side shim/CCAAS bridge.
 type Executor interface {
@@ -112,11 +128,12 @@ func (r *QueryServiceStateReader) GetState(ctx context.Context, view *committerp
 // is not durable storage. It records the dependencies and effects that will be
 // converted into a Fabric-X transaction after execution.
 type ExecutionContext struct {
-	reader    StateReader
-	namespace string
-	queryView *committerpb.View
-	reads     map[string]blocks.KVRead
-	writes    map[string]blocks.KVWrite
+	reader        StateReader
+	namespace     string
+	queryView     *committerpb.View
+	clientCreator []byte
+	reads         map[string]blocks.KVRead
+	writes        map[string]blocks.KVWrite
 }
 
 // NewExecutionContext creates the transient context used by one invocation.
@@ -149,6 +166,16 @@ func (c *ExecutionContext) QueryView() *committerpb.View {
 // SetQueryView records the Query Service view used for this invocation.
 func (c *ExecutionContext) SetQueryView(view *committerpb.View) {
 	c.queryView = view
+}
+
+// ClientCreator returns the serialized creator from the original client proposal.
+func (c *ExecutionContext) ClientCreator() []byte {
+	return append([]byte(nil), c.clientCreator...)
+}
+
+// SetClientCreator records the original client proposal creator for shim identity APIs.
+func (c *ExecutionContext) SetClientCreator(creator []byte) {
+	c.clientCreator = append([]byte(nil), creator...)
 }
 
 // GetState is the method the future shim handler should call for GetState
@@ -286,6 +313,10 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
 		inv.TxID, inv.Channel, inv.CCID.Name, inv.CCID.Version, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.CCID.Name)
+	if creator := clientCreatorFromContext(ctx); len(creator) > 0 {
+		execCtx.SetClientCreator(creator)
+		s.logger.Debugf("tx=%s original client creator attached creator_bytes=%d", inv.TxID, len(creator))
+	}
 	res, meta, err := executor.Execute(ctx, execCtx, inv)
 	if err != nil {
 		s.logger.Warnf("tx=%s chaincode execution failed: %s", inv.TxID, err)

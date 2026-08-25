@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
@@ -50,7 +51,10 @@ func TestExecuteRunsCCAASMessageLoop(t *testing.T) {
 	result, err := connector.Execute(ctx, state, Invocation{
 		TxID:      "tx1",
 		ChannelID: "channelqc4",
+		Namespace: "0",
 		Args:      [][]byte{[]byte("transfer"), []byte("asset1")},
+		Creator:   []byte("creator"),
+		Nonce:     []byte("nonce"),
 	})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -131,6 +135,24 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 	}
 	if len(input.Args) != 2 || string(input.Args[0]) != "transfer" || string(input.Args[1]) != "asset1" {
 		return fmt.Errorf("unexpected transaction args: %q", input.Args)
+	}
+	if txMsg.Proposal == nil {
+		return fmt.Errorf("transaction proposal is nil")
+	}
+	proposal := &peer.Proposal{}
+	if err := proto.Unmarshal(txMsg.Proposal.ProposalBytes, proposal); err != nil {
+		return err
+	}
+	header := &common.Header{}
+	if err := proto.Unmarshal(proposal.Header, header); err != nil {
+		return err
+	}
+	signatureHeader := &common.SignatureHeader{}
+	if err := proto.Unmarshal(header.SignatureHeader, signatureHeader); err != nil {
+		return err
+	}
+	if string(signatureHeader.Creator) != "creator" {
+		return fmt.Errorf("transaction creator = %q, want creator", string(signatureHeader.Creator))
 	}
 
 	if err := s.getState(stream, txMsg); err != nil {

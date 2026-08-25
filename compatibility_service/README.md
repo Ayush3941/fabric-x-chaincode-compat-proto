@@ -94,20 +94,22 @@ GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
 steps. Run the client from another terminal with `FABRIC_LOGGING_SPEC=error`;
 client-side debug output is mostly gRPC internals.
 
-Submit a real V1 invoke:
+Submit a real compatibility invoke:
 
 ```bash
 cd compatibility_service
 
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client.yaml \
-  '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
-`compatv1` seeds the temporary old and delete values inside the same
-invocation, so no setup `put` transactions are required.
+`compatv2` seeds the temporary old and delete values inside the same
+invocation, so no setup `put` transactions are required. It also checks
+`stub.GetCreator()`, `cid.GetMSPID(stub)`, and `cid.GetID(stub)`.
 
-The final response should include `commit_status: "COMMITTED"`.
+The final response should include `commit_status: "COMMITTED"`,
+`client_msp_id: "org-0"`, and non-empty creator/client identity fields.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 twice:

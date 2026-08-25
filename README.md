@@ -26,6 +26,7 @@ Fabric-X blocks under `runtime/committer/ledger`.
 - `GetState`, `PutState`, `DelState`, and read-your-writes behavior.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
 - `GetTxID`, `GetChannelID`.
+- `stub.GetCreator`, `cid.GetMSPID`, `cid.GetID`.
 - `CreateCompositeKey`, `SplitCompositeKey`.
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`.
 - One event payload through `SetEvent`.
@@ -141,12 +142,12 @@ Important endpoints:
 
 ## Run The Demo
 
-From `compatibility_service`:
+From `compatibility_service`, run the current compatibility path:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   -c sampleconfig/client.yaml \
-  '{"Function":"compatv1","Args":["asset1","new-value","asset-to-delete"]}'
+  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
 Expected response fields:
@@ -155,17 +156,22 @@ Expected response fields:
 "status": 200
 "submitted": true
 "commit_status": "COMMITTED"
+"client_msp_id": "org-0"
+"creator_bytes": 800
+"client_id": "..."
 "chaincode_event": { "event_name": "log", ... }
 ```
 
-`compatv1` is self-contained. It seeds `old-value` and `delete-me` inside the
-same chaincode invocation, so no setup `put` transactions are required.
+`compatv2` is self-contained. It seeds `old-value` and `delete-me` inside the
+same chaincode invocation, so no setup `put` transactions are required. It also
+checks the current client identity path with `stub.GetCreator()`,
+`cid.GetMSPID(stub)`, and `cid.GetID(stub)`.
 
-`compatv2` currently has the same chaincode behavior plus an orchestrator
-idempotency check. Two identical invokes from the same client identity return the
-same helper transaction result; the second response includes
-`"idempotent_replay": true` and does not submit another Fabric-X transaction.
-The current store is in-memory and is reset when the orchestrator restarts.
+To check the current idempotency prototype, run the same `compatv2` invoke
+again from the same client identity. The second response returns the same helper
+transaction result, includes `"idempotent_replay": true`, and does not submit
+another Fabric-X transaction. The current store is in-memory and is reset when
+the orchestrator restarts.
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
@@ -182,17 +188,17 @@ Verify final state:
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client query \
   -c sampleconfig/client.yaml \
-  '{"Function":"get","Args":["asset1"]}'
+  '{"Function":"get","Args":["asset-v2"]}'
 
 FABRIC_LOGGING_SPEC=error ./bin/client query \
   -c sampleconfig/client.yaml \
-  '{"Function":"get","Args":["asset-to-delete"]}'
+  '{"Function":"get","Args":["asset-v2-delete"]}'
 ```
 
 Expected:
 
 ```text
-new-value
+value-v2
 ```
 
 The second query should print an empty payload because the key was deleted.
@@ -211,12 +217,12 @@ Dump one transaction:
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
-A successful `compatv1` block should show a Fabric-X `MESSAGE` envelope with an
+A successful `compatv2` block should show a Fabric-X `MESSAGE` envelope with an
 `applicationpb.Tx`, one endorsement, event metadata, and writes for:
 
 ```text
-asset1 -> "new-value"
-asset-to-delete -> <nil>
+asset-v2 -> "value-v2"
+asset-v2-delete -> <nil>
 ```
 
 ## Tests

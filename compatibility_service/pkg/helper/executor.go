@@ -29,12 +29,17 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *Executio
 		return endorsement.ExecutionResult{}, ExecutionMetadata{}, fmt.Errorf("shim connector is not configured")
 	}
 
+	creator := inv.Creator
+	if clientCreator := execCtx.ClientCreator(); len(clientCreator) > 0 {
+		creator = clientCreator
+	}
+
 	res, err := e.connector.Execute(ctx, execCtx, shim.Invocation{
 		TxID:      inv.TxID,
 		ChannelID: inv.Channel,
 		Namespace: execCtx.Namespace(),
 		Args:      inv.Args,
-		Creator:   inv.Creator,
+		Creator:   creator,
 		Nonce:     inv.Nonce,
 		QueryView: execCtx.QueryView(),
 	})

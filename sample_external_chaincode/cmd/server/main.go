@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/hyperledger/fabric-chaincode-go/v2/pkg/cid"
 	"github.com/hyperledger/fabric-chaincode-go/v2/shim"
 	pb "github.com/hyperledger/fabric-protos-go-apiv2/peer"
 )
@@ -237,6 +239,18 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 		}
 
 		function, params := stub.GetFunctionAndParameters()
+		creator, err := stub.GetCreator()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		clientMSPID, err := cid.GetMSPID(stub)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		clientID, err := cid.GetID(stub)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
 		payload, err := json.Marshal(map[string]any{
 			"args":                       byteArgsToStrings(stub.GetArgs()),
 			"string_args":                stub.GetStringArgs(),
@@ -244,6 +258,10 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 			"parameters":                 params,
 			"tx_id":                      stub.GetTxID(),
 			"channel_id":                 stub.GetChannelID(),
+			"creator_bytes":              len(creator),
+			"creator_base64":             base64.StdEncoding.EncodeToString(creator),
+			"client_id":                  clientID,
+			"client_msp_id":              clientMSPID,
 			"committed_old_value":        nullableString(committedOldValue),
 			"committed_delete_old_value": nullableString(committedDeleteValue),
 			"seed_old_value":             seedOldValue,

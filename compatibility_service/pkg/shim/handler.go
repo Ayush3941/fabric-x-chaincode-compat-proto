@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"google.golang.org/protobuf/proto"
 )
@@ -97,19 +99,61 @@ func (h *messageHandler) sendTransaction() error {
 	if err != nil {
 		return fmt.Errorf("marshal transaction input: %w", err)
 	}
+	proposal, err := h.signedProposal()
+	if err != nil {
+		return err
+	}
 
 	msg := &peer.ChaincodeMessage{
 		Type:      peer.ChaincodeMessage_TRANSACTION,
 		Payload:   payload,
 		Txid:      h.inv.TxID,
 		ChannelId: h.inv.ChannelID,
+		Proposal:  proposal,
 	}
-	h.logger.Infof("tx=%s shim TRANSACTION sent ccid=%s fn=%s args=%d channel=%s",
-		h.inv.TxID, h.ccid, firstArg(h.inv.Args), len(h.inv.Args)-1, h.inv.ChannelID)
+	h.logger.Infof("tx=%s shim TRANSACTION sent ccid=%s fn=%s args=%d channel=%s creator_bytes=%d",
+		h.inv.TxID, h.ccid, firstArg(h.inv.Args), len(h.inv.Args)-1, h.inv.ChannelID, len(h.inv.Creator))
 	if err := h.stream.Send(msg); err != nil {
 		return fmt.Errorf("send TRANSACTION to chaincode: %w", err)
 	}
 	return nil
+}
+
+func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
+	if len(h.inv.Creator) == 0 {
+		return nil, nil
+	}
+	nonce := append([]byte(nil), h.inv.Nonce...)
+	if len(nonce) == 0 {
+		nonce = []byte(h.inv.TxID)
+	}
+	proposal, _, err := protoutil.CreateChaincodeProposalWithTxIDNonceAndTransient(
+		h.inv.TxID,
+		common.HeaderType_ENDORSER_TRANSACTION,
+		h.inv.ChannelID,
+		&peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				Type: peer.ChaincodeSpec_CAR,
+				ChaincodeId: &peer.ChaincodeID{
+					Name: h.inv.Namespace,
+				},
+				Input: &peer.ChaincodeInput{
+					Args: h.inv.Args,
+				},
+			},
+		},
+		nonce,
+		h.inv.Creator,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create chaincode proposal context: %w", err)
+	}
+	proposalBytes, err := proto.Marshal(proposal)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chaincode proposal context: %w", err)
+	}
+	return &peer.SignedProposal{ProposalBytes: proposalBytes}, nil
 }
 
 func (h *messageHandler) handleGetState(ctx context.Context, msg *peer.ChaincodeMessage) error {
