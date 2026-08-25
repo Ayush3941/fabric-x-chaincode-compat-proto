@@ -33,15 +33,20 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *Executio
 	if clientCreator := execCtx.ClientCreator(); len(clientCreator) > 0 {
 		creator = clientCreator
 	}
+	nonce := inv.Nonce
+	if clientNonce := execCtx.ClientNonce(); len(clientNonce) > 0 {
+		nonce = clientNonce
+	}
 
 	res, err := e.connector.Execute(ctx, execCtx, shim.Invocation{
-		TxID:      inv.TxID,
-		ChannelID: inv.Channel,
-		Namespace: execCtx.Namespace(),
-		Args:      inv.Args,
-		Creator:   creator,
-		Nonce:     inv.Nonce,
-		QueryView: execCtx.QueryView(),
+		TxID:        inv.TxID,
+		ChannelID:   inv.Channel,
+		Namespace:   execCtx.Namespace(),
+		Args:        inv.Args,
+		Creator:     creator,
+		Nonce:       nonce,
+		Decorations: execCtx.Decorations(),
+		QueryView:   execCtx.QueryView(),
 	})
 	if err != nil {
 		return endorsement.ExecutionResult{}, ExecutionMetadata{}, err

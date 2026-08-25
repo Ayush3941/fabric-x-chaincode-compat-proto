@@ -41,20 +41,36 @@ type Service struct {
 	logger      sdk.Logger
 }
 
-type clientCreatorContextKey struct{}
+type clientProposalContextKey struct{}
 
-// WithClientCreator carries the original client proposal creator through the
-// in-process helper path so chaincode identity APIs see the invoking client.
-func WithClientCreator(ctx context.Context, creator []byte) context.Context {
-	if len(creator) == 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, clientCreatorContextKey{}, append([]byte(nil), creator...))
+// ClientProposalContext carries the original client proposal fields needed by
+// chaincode identity and binding APIs.
+type ClientProposalContext struct {
+	Creator     []byte
+	Nonce       []byte
+	Decorations map[string][]byte
 }
 
-func clientCreatorFromContext(ctx context.Context) []byte {
-	creator, _ := ctx.Value(clientCreatorContextKey{}).([]byte)
-	return append([]byte(nil), creator...)
+// WithClientProposal carries original client proposal fields through the
+// in-process helper path so chaincode sees the invoking client's context.
+func WithClientProposal(ctx context.Context, proposal ClientProposalContext) context.Context {
+	if len(proposal.Creator) == 0 && len(proposal.Nonce) == 0 && len(proposal.Decorations) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, clientProposalContextKey{}, ClientProposalContext{
+		Creator:     append([]byte(nil), proposal.Creator...),
+		Nonce:       append([]byte(nil), proposal.Nonce...),
+		Decorations: cloneByteMap(proposal.Decorations),
+	})
+}
+
+func clientProposalFromContext(ctx context.Context) ClientProposalContext {
+	proposal, _ := ctx.Value(clientProposalContextKey{}).(ClientProposalContext)
+	return ClientProposalContext{
+		Creator:     append([]byte(nil), proposal.Creator...),
+		Nonce:       append([]byte(nil), proposal.Nonce...),
+		Decorations: cloneByteMap(proposal.Decorations),
+	}
 }
 
 // Executor is the application execution boundary. For this prototype, the
@@ -132,6 +148,8 @@ type ExecutionContext struct {
 	namespace     string
 	queryView     *committerpb.View
 	clientCreator []byte
+	clientNonce   []byte
+	decorations   map[string][]byte
 	reads         map[string]blocks.KVRead
 	writes        map[string]blocks.KVWrite
 }
@@ -176,6 +194,26 @@ func (c *ExecutionContext) ClientCreator() []byte {
 // SetClientCreator records the original client proposal creator for shim identity APIs.
 func (c *ExecutionContext) SetClientCreator(creator []byte) {
 	c.clientCreator = append([]byte(nil), creator...)
+}
+
+// ClientNonce returns the original client proposal nonce.
+func (c *ExecutionContext) ClientNonce() []byte {
+	return append([]byte(nil), c.clientNonce...)
+}
+
+// SetClientNonce records the original client proposal nonce for binding semantics.
+func (c *ExecutionContext) SetClientNonce(nonce []byte) {
+	c.clientNonce = append([]byte(nil), nonce...)
+}
+
+// Decorations returns peer-style proposal decorations for the chaincode stub.
+func (c *ExecutionContext) Decorations() map[string][]byte {
+	return cloneByteMap(c.decorations)
+}
+
+// SetDecorations records peer-style proposal decorations for the chaincode stub.
+func (c *ExecutionContext) SetDecorations(decorations map[string][]byte) {
+	c.decorations = cloneByteMap(decorations)
 }
 
 // GetState is the method the future shim handler should call for GetState
@@ -313,9 +351,12 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
 		inv.TxID, inv.Channel, inv.CCID.Name, inv.CCID.Version, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.CCID.Name)
-	if creator := clientCreatorFromContext(ctx); len(creator) > 0 {
-		execCtx.SetClientCreator(creator)
-		s.logger.Debugf("tx=%s original client creator attached creator_bytes=%d", inv.TxID, len(creator))
+	if proposal := clientProposalFromContext(ctx); len(proposal.Creator) > 0 || len(proposal.Nonce) > 0 || len(proposal.Decorations) > 0 {
+		execCtx.SetClientCreator(proposal.Creator)
+		execCtx.SetClientNonce(proposal.Nonce)
+		execCtx.SetDecorations(proposal.Decorations)
+		s.logger.Debugf("tx=%s original client proposal attached creator_bytes=%d nonce_bytes=%d decorations=%d",
+			inv.TxID, len(proposal.Creator), len(proposal.Nonce), len(proposal.Decorations))
 	}
 	res, meta, err := executor.Execute(ctx, execCtx, inv)
 	if err != nil {
@@ -354,6 +395,17 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	)
 
 	return end, nil
+}
+
+func cloneByteMap(in map[string][]byte) map[string][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(in))
+	for key, value := range in {
+		out[key] = append([]byte(nil), value...)
+	}
+	return out
 }
 
 func argString(args [][]byte, index int) string {

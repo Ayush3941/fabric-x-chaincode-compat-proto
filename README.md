@@ -26,7 +26,8 @@ Fabric-X blocks under `runtime/committer/ledger`.
 - `GetState`, `PutState`, `DelState`, and read-your-writes behavior.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
 - `GetTxID`, `GetChannelID`.
-- `stub.GetCreator`, `cid.GetMSPID`, `cid.GetID`.
+- `stub.GetCreator`, `cid.GetMSPID`, `cid.GetID`, `stub.GetBinding`,
+  `stub.GetDecorations`.
 - `CreateCompositeKey`, `SplitCompositeKey`.
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`.
 - One event payload through `SetEvent`.
@@ -158,6 +159,8 @@ Expected response fields:
 "commit_status": "COMMITTED"
 "client_msp_id": "org-0"
 "creator_bytes": 800
+"binding_bytes": 32
+"decorations": { "compat.decorator": "orchestrator", ... }
 "client_id": "..."
 "chaincode_event": { "event_name": "log", ... }
 ```
@@ -165,7 +168,8 @@ Expected response fields:
 `compatv2` is self-contained. It seeds `old-value` and `delete-me` inside the
 same chaincode invocation, so no setup `put` transactions are required. It also
 checks the current client identity path with `stub.GetCreator()`,
-`cid.GetMSPID(stub)`, and `cid.GetID(stub)`.
+`cid.GetMSPID(stub)`, `cid.GetID(stub)`, `stub.GetBinding()`, and
+`stub.GetDecorations()`.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 again from the same client identity. The second response returns the same helper

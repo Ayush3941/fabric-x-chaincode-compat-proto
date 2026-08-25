@@ -65,6 +65,7 @@ type Config struct {
 type InvocationRequest struct {
 	ClientTxID     string   `json:"-"`
 	ClientCreator  []byte   `json:"-"`
+	ClientNonce    []byte   `json:"-"`
 	IdempotencyKey string   `json:"-"`
 	RequestDigest  string   `json:"-"`
 	Namespace      string   `json:"namespace,omitempty"`
@@ -300,6 +301,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	}
 	req.ClientTxID = inv.TxID
 	req.ClientCreator = append([]byte(nil), inv.Creator...)
+	req.ClientNonce = append([]byte(nil), inv.Nonce...)
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
 		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
 
@@ -377,7 +379,11 @@ func (s *Service) executeFresh(
 ) (InvocationResponse, error) {
 	s.logger.Infof("orchestrator calling in-process helper operation=%s namespace=%s fn=%s args=%d",
 		operationName(submit), namespace, req.Function, len(req.Args))
-	end, err := s.executeHelper(ctx, namespace, "1.0", args, req.ClientCreator)
+	end, err := s.executeHelper(ctx, namespace, "1.0", args, helper.ClientProposalContext{
+		Creator:     req.ClientCreator,
+		Nonce:       req.ClientNonce,
+		Decorations: compatibilityDecorations(namespace),
+	})
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
@@ -447,7 +453,7 @@ func (s *Service) executeFresh(
 	return out, nil
 }
 
-func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, clientCreator []byte) (sdk.Endorsement, error) {
+func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, clientProposal helper.ClientProposalContext) (sdk.Endorsement, error) {
 	if s.helper == nil {
 		return sdk.Endorsement{}, errors.New("internal helper is not configured")
 	}
@@ -466,7 +472,7 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 	s.logger.Infof("tx=%s helper proposal created namespace=%s version=%s fn=%s args=%d",
 		txID, namespace, nsVersion, argString(args, 0), len(args)-1)
 
-	resp, err := s.helper.ProcessProposal(helper.WithClientCreator(ctx, clientCreator), prop)
+	resp, err := s.helper.ProcessProposal(helper.WithClientProposal(ctx, clientProposal), prop)
 	if err != nil {
 		return sdk.Endorsement{}, fmt.Errorf("helper process proposal: %w", err)
 	}
@@ -699,6 +705,13 @@ func operationName(submit bool) string {
 		return "invoke"
 	}
 	return "query"
+}
+
+func compatibilityDecorations(namespace string) map[string][]byte {
+	return map[string][]byte{
+		"compat.decorator": []byte("orchestrator"),
+		"compat.namespace": []byte(namespace),
+	}
 }
 
 func idempotencyIdentity(channel, namespace string, req InvocationRequest, submit bool) (string, string) {

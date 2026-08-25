@@ -94,7 +94,7 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 }
 
 func (h *messageHandler) sendTransaction() error {
-	input := &peer.ChaincodeInput{Args: h.inv.Args}
+	input := &peer.ChaincodeInput{Args: h.inv.Args, Decorations: cloneByteMap(h.inv.Decorations)}
 	payload, err := proto.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("marshal transaction input: %w", err)
@@ -138,7 +138,8 @@ func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
 					Name: h.inv.Namespace,
 				},
 				Input: &peer.ChaincodeInput{
-					Args: h.inv.Args,
+					Args:        h.inv.Args,
+					Decorations: cloneByteMap(h.inv.Decorations),
 				},
 			},
 		},
@@ -154,6 +155,17 @@ func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
 		return nil, fmt.Errorf("marshal chaincode proposal context: %w", err)
 	}
 	return &peer.SignedProposal{ProposalBytes: proposalBytes}, nil
+}
+
+func cloneByteMap(in map[string][]byte) map[string][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(in))
+	for key, value := range in {
+		out[key] = append([]byte(nil), value...)
+	}
+	return out
 }
 
 func (h *messageHandler) handleGetState(ctx context.Context, msg *peer.ChaincodeMessage) error {

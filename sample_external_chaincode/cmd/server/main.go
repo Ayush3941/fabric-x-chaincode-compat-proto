@@ -251,6 +251,11 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 		if err != nil {
 			return shim.Error(err.Error())
 		}
+		binding, err := stub.GetBinding()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		decorations := byteMapToStrings(stub.GetDecorations())
 		payload, err := json.Marshal(map[string]any{
 			"args":                       byteArgsToStrings(stub.GetArgs()),
 			"string_args":                stub.GetStringArgs(),
@@ -262,6 +267,9 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 			"creator_base64":             base64.StdEncoding.EncodeToString(creator),
 			"client_id":                  clientID,
 			"client_msp_id":              clientMSPID,
+			"binding_bytes":              len(binding),
+			"binding_base64":             base64.StdEncoding.EncodeToString(binding),
+			"decorations":                decorations,
 			"committed_old_value":        nullableString(committedOldValue),
 			"committed_delete_old_value": nullableString(committedDeleteValue),
 			"seed_old_value":             seedOldValue,
@@ -337,6 +345,14 @@ func byteArgsToStrings(args [][]byte) []string {
 	res := make([]string, 0, len(args))
 	for _, arg := range args {
 		res = append(res, string(arg))
+	}
+	return res
+}
+
+func byteMapToStrings(values map[string][]byte) map[string]string {
+	res := make(map[string]string, len(values))
+	for key, value := range values {
+		res[key] = string(value)
 	}
 	return res
 }
