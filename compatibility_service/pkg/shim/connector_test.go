@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
+	"github.com/hyperledger/fabric-x-common/protoutil"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
@@ -48,16 +49,19 @@ func TestExecuteRunsCCAASMessageLoop(t *testing.T) {
 	defer cancel()
 
 	state := newTestState()
+	args := [][]byte{[]byte("transfer"), []byte("asset1")}
+	decorations := map[string][]byte{
+		"compat.decorator": []byte("orchestrator"),
+	}
 	result, err := connector.Execute(ctx, state, Invocation{
-		TxID:      "tx1",
-		ChannelID: "channelqc4",
-		Namespace: "0",
-		Args:      [][]byte{[]byte("transfer"), []byte("asset1")},
-		Creator:   []byte("creator"),
-		Nonce:     []byte("nonce"),
-		Decorations: map[string][]byte{
-			"compat.decorator": []byte("orchestrator"),
-		},
+		TxID:           "tx1",
+		ChannelID:      "channelqc4",
+		Namespace:      "0",
+		Args:           args,
+		Creator:        []byte("creator"),
+		Nonce:          []byte("nonce"),
+		SignedProposal: testSignedProposal(t, "tx1", "channelqc4", "0", args, decorations, []byte("creator"), []byte("nonce"), []byte("client-signature")),
+		Decorations:    decorations,
 	})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -145,6 +149,9 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 	if txMsg.Proposal == nil {
 		return fmt.Errorf("transaction proposal is nil")
 	}
+	if string(txMsg.Proposal.Signature) != "client-signature" {
+		return fmt.Errorf("transaction proposal signature = %q, want client-signature", string(txMsg.Proposal.Signature))
+	}
 	proposal := &peer.Proposal{}
 	if err := proto.Unmarshal(txMsg.Proposal.ProposalBytes, proposal); err != nil {
 		return err
@@ -200,6 +207,52 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 		return nil
 	}
 	return err
+}
+
+func testSignedProposal(
+	t *testing.T,
+	txID string,
+	channel string,
+	namespace string,
+	args [][]byte,
+	decorations map[string][]byte,
+	creator []byte,
+	nonce []byte,
+	signature []byte,
+) *peer.SignedProposal {
+	t.Helper()
+
+	proposal, _, err := protoutil.CreateChaincodeProposalWithTxIDNonceAndTransient(
+		txID,
+		common.HeaderType_ENDORSER_TRANSACTION,
+		channel,
+		&peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				Type: peer.ChaincodeSpec_CAR,
+				ChaincodeId: &peer.ChaincodeID{
+					Name: namespace,
+				},
+				Input: &peer.ChaincodeInput{
+					Args:        args,
+					Decorations: cloneByteMap(decorations),
+				},
+			},
+		},
+		nonce,
+		creator,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	proposalBytes, err := proto.Marshal(proposal)
+	if err != nil {
+		t.Fatalf("marshal proposal: %v", err)
+	}
+	return &peer.SignedProposal{
+		ProposalBytes: proposalBytes,
+		Signature:     append([]byte(nil), signature...),
+	}
 }
 
 func (s *handshakeChaincodeServer) getState(stream peer.Chaincode_ConnectServer, txMsg *peer.ChaincodeMessage) error {

@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -38,8 +39,9 @@ import (
 )
 
 const (
-	GRPCOperationInvoke = "__orchestrator_invoke"
-	GRPCOperationQuery  = "__orchestrator_query"
+	GRPCOperationMetadata = "x-compat-operation"
+	GRPCOperationInvoke   = "invoke"
+	GRPCOperationQuery    = "query"
 )
 
 // Config contains the V1 orchestrator wiring. The orchestrator receives a small
@@ -63,14 +65,15 @@ type Config struct {
 // InvocationRequest is the orchestrator's internal normalized request after a
 // signed proposal has been parsed.
 type InvocationRequest struct {
-	ClientTxID     string   `json:"-"`
-	ClientCreator  []byte   `json:"-"`
-	ClientNonce    []byte   `json:"-"`
-	IdempotencyKey string   `json:"-"`
-	RequestDigest  string   `json:"-"`
-	Namespace      string   `json:"namespace,omitempty"`
-	Function       string   `json:"function,omitempty"`
-	Args           []string `json:"args,omitempty"`
+	ClientTxID           string               `json:"-"`
+	ClientCreator        []byte               `json:"-"`
+	ClientNonce          []byte               `json:"-"`
+	ClientSignedProposal *peer.SignedProposal `json:"-"`
+	IdempotencyKey       string               `json:"-"`
+	RequestDigest        string               `json:"-"`
+	Namespace            string               `json:"namespace,omitempty"`
+	Function             string               `json:"function,omitempty"`
+	Args                 []string             `json:"args,omitempty"`
 }
 
 // InvocationResponse is returned by query and invoke.
@@ -284,8 +287,8 @@ func (s *Service) Close() error {
 }
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client. The
-// first proposal argument is an orchestrator operation marker; it is
-// stripped before the helper invokes chaincode.
+// operation is carried as gRPC metadata so the proposal itself remains the exact
+// chaincode proposal that will be exposed through stub.GetSignedProposal().
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
 	if err != nil {
@@ -295,13 +298,19 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("channel must be %s", s.cfg.ChannelID))
 	}
 
-	req, submit, err := requestFromProposal(inv)
+	submit, err := operationFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	req, err := requestFromProposal(inv)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	req.ClientTxID = inv.TxID
 	req.ClientCreator = append([]byte(nil), inv.Creator...)
 	req.ClientNonce = append([]byte(nil), inv.Nonce...)
+	req.ClientSignedProposal = cloneSignedProposal(prop)
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
 		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
 
@@ -379,11 +388,13 @@ func (s *Service) executeFresh(
 ) (InvocationResponse, error) {
 	s.logger.Infof("orchestrator calling in-process helper operation=%s namespace=%s fn=%s args=%d",
 		operationName(submit), namespace, req.Function, len(req.Args))
-	end, err := s.executeHelper(ctx, namespace, "1.0", args, helper.ClientProposalContext{
-		Creator:     req.ClientCreator,
-		Nonce:       req.ClientNonce,
-		Decorations: compatibilityDecorations(namespace),
-	})
+	clientProposal := helper.ClientProposalContext{
+		Creator:        req.ClientCreator,
+		Nonce:          req.ClientNonce,
+		SignedProposal: req.ClientSignedProposal,
+		Decorations:    compatibilityDecorations(namespace),
+	}
+	end, err := s.executeHelper(ctx, namespace, "1.0", args, clientProposal)
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
@@ -457,9 +468,13 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 	if s.helper == nil {
 		return sdk.Endorsement{}, errors.New("internal helper is not configured")
 	}
-	prop, err := network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
-	if err != nil {
-		return sdk.Endorsement{}, fmt.Errorf("create helper proposal: %w", err)
+	prop := clientProposal.SignedProposal
+	if prop == nil {
+		var err error
+		prop, err = network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
+		if err != nil {
+			return sdk.Endorsement{}, fmt.Errorf("create helper proposal: %w", err)
+		}
 	}
 	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
 	if err != nil {
@@ -605,31 +620,36 @@ func invocationArgs(req InvocationRequest) [][]byte {
 	return args
 }
 
-func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, bool, error) {
-	if len(inv.Args) < 2 {
-		return InvocationRequest{}, false, errors.New("orchestrator proposal requires operation marker and function")
+func operationFromContext(ctx context.Context) (bool, error) {
+	values := metadata.ValueFromIncomingContext(ctx, GRPCOperationMetadata)
+	if len(values) == 0 {
+		return false, fmt.Errorf("missing %s metadata", GRPCOperationMetadata)
 	}
-
-	var submit bool
-	switch string(inv.Args[0]) {
+	switch values[0] {
 	case GRPCOperationInvoke:
-		submit = true
+		return true, nil
 	case GRPCOperationQuery:
-		submit = false
+		return false, nil
 	default:
-		return InvocationRequest{}, false, fmt.Errorf("unknown orchestrator operation %q", string(inv.Args[0]))
+		return false, fmt.Errorf("unknown orchestrator operation %q", values[0])
+	}
+}
+
+func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) {
+	if len(inv.Args) < 1 {
+		return InvocationRequest{}, errors.New("orchestrator proposal requires function")
 	}
 
 	req := InvocationRequest{
-		Function: string(inv.Args[1]),
+		Function: string(inv.Args[0]),
 	}
 	if inv.CCID != nil {
 		req.Namespace = inv.CCID.Name
 	}
-	for _, arg := range inv.Args[2:] {
+	for _, arg := range inv.Args[1:] {
 		req.Args = append(req.Args, string(arg))
 	}
-	return req, submit, nil
+	return req, nil
 }
 
 func responseFromPeer(txID string, resp *peer.Response) InvocationResponse {
@@ -721,7 +741,7 @@ func idempotencyIdentity(channel, namespace string, req InvocationRequest, submi
 
 func requestDigest(channel, namespace string, req InvocationRequest, submit bool) string {
 	h := sha256.New()
-	writeDigestString(h, "v1")
+	writeDigestString(h, "v2")
 	writeDigestString(h, operationName(submit))
 	writeDigestString(h, channel)
 	writeDigestString(h, namespace)
@@ -756,4 +776,14 @@ func loggerOrNoop(logger sdk.Logger) sdk.Logger {
 		return sdk.NoOpLogger{}
 	}
 	return logger
+}
+
+func cloneSignedProposal(prop *peer.SignedProposal) *peer.SignedProposal {
+	if prop == nil {
+		return nil
+	}
+	return &peer.SignedProposal{
+		ProposalBytes: append([]byte(nil), prop.ProposalBytes...),
+		Signature:     append([]byte(nil), prop.Signature...),
+	}
 }

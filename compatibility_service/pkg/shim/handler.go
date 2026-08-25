@@ -120,6 +120,9 @@ func (h *messageHandler) sendTransaction() error {
 }
 
 func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
+	if h.inv.SignedProposal != nil {
+		return cloneSignedProposal(h.inv.SignedProposal), nil
+	}
 	if len(h.inv.Creator) == 0 {
 		return nil, nil
 	}
@@ -155,6 +158,16 @@ func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
 		return nil, fmt.Errorf("marshal chaincode proposal context: %w", err)
 	}
 	return &peer.SignedProposal{ProposalBytes: proposalBytes}, nil
+}
+
+func cloneSignedProposal(prop *peer.SignedProposal) *peer.SignedProposal {
+	if prop == nil {
+		return nil
+	}
+	return &peer.SignedProposal{
+		ProposalBytes: append([]byte(nil), prop.ProposalBytes...),
+		Signature:     append([]byte(nil), prop.Signature...),
+	}
 }
 
 func cloneByteMap(in map[string][]byte) map[string][]byte {

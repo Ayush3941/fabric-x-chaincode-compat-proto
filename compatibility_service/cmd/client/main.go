@@ -20,6 +20,7 @@ import (
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/metadata"
 )
 
 // Config holds all configuration for the client.
@@ -199,50 +200,35 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, operation stri
 		return orchestrator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
 	}
 
-	ec, err := network.NewEndorsementClient([]network.PeerConf{cfg.Orchestrator.ToPeerConf()}, signer, cfg.ChannelID, namespace, "1.0")
+	if operation != orchestrator.GRPCOperationInvoke && operation != orchestrator.GRPCOperationQuery {
+		return orchestrator.InvocationResponse{}, fmt.Errorf("unknown orchestrator operation %q", operation)
+	}
+
+	prop, err := network.NewSignedProposal(signer, cfg.ChannelID, namespace, "1.0", txArgs)
+	if err != nil {
+		return orchestrator.InvocationResponse{}, fmt.Errorf("create signed proposal: %w", err)
+	}
+
+	orchestratorPeer, err := network.NewPeer(cfg.Orchestrator.ToPeerConf())
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("create orchestrator grpc client: %w", err)
 	}
-	defer ec.Close() //nolint:errcheck
+	defer orchestratorPeer.Close() //nolint:errcheck
 
-	args, err := orchestratorProposalArgs(operation, txArgs)
-	if err != nil {
-		return orchestrator.InvocationResponse{}, err
-	}
-
-	end, err := ec.ExecuteTransaction(ctx, namespace, "1.0", args)
+	ctx = metadata.AppendToOutgoingContext(ctx, orchestrator.GRPCOperationMetadata, operation)
+	resp, err := orchestratorPeer.ProcessProposal(ctx, prop)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator grpc call failed: %w", err)
 	}
-	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
+	if resp == nil || resp.Response == nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator returned no response")
 	}
 
-	resp := end.Responses[0].Response
 	var out orchestrator.InvocationResponse
-	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+	if err := json.Unmarshal(resp.Response.Payload, &out); err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("decode orchestrator grpc response: %w", err)
 	}
 	return out, nil
-}
-
-func orchestratorProposalArgs(operation string, txArgs [][]byte) ([][]byte, error) {
-	var marker string
-	switch operation {
-	case "invoke":
-		marker = orchestrator.GRPCOperationInvoke
-	case "query":
-		marker = orchestrator.GRPCOperationQuery
-	default:
-		return nil, fmt.Errorf("unknown orchestrator operation %q", operation)
-	}
-
-	args := make([][]byte, 0, 1+len(txArgs))
-	args = append(args, []byte(marker))
-	for _, arg := range txArgs {
-		args = append(args, append([]byte(nil), arg...))
-	}
-	return args, nil
 }
 
 func namespaceOrDefault(cmd *cobra.Command, cfgNamespace string) string {

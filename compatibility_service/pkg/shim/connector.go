@@ -35,14 +35,15 @@ type State interface {
 // Invocation is the Fabric-style transaction context needed by an isolated
 // chaincode execution.
 type Invocation struct {
-	TxID        string
-	ChannelID   string
-	Namespace   string
-	Args        [][]byte
-	Creator     []byte
-	Nonce       []byte
-	Decorations map[string][]byte
-	QueryView   *committerpb.View
+	TxID           string
+	ChannelID      string
+	Namespace      string
+	Args           [][]byte
+	Creator        []byte
+	Nonce          []byte
+	SignedProposal *peer.SignedProposal
+	Decorations    map[string][]byte
+	QueryView      *committerpb.View
 }
 
 // Result is the chaincode execution result returned by the shim bridge.

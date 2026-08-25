@@ -107,11 +107,12 @@ FABRIC_LOGGING_SPEC=error ./bin/client invoke \
 `compatv2` seeds the temporary old and delete values inside the same
 invocation, so no setup `put` transactions are required. It also checks
 `stub.GetCreator()`, `cid.GetMSPID(stub)`, `cid.GetID(stub)`,
-`stub.GetBinding()`, and `stub.GetDecorations()`.
+`stub.GetBinding()`, `stub.GetDecorations()`, and `stub.GetSignedProposal()`.
 
 The final response should include `commit_status: "COMMITTED"`,
 `client_msp_id: "org-0"`, `binding_bytes: 32`, populated compatibility
-decorations, and non-empty creator/client identity fields.
+decorations, a present signed proposal, and non-empty creator/client identity
+fields.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 twice:
@@ -167,7 +168,7 @@ Implemented for the sample chaincode:
 - read-your-writes overlay
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
 - `GetTxID`, `GetChannelID`
-- `GetCreator`, `GetBinding`, `GetDecorations`
+- `GetCreator`, `GetBinding`, `GetDecorations`, `GetSignedProposal`
 - `CreateCompositeKey`, `SplitCompositeKey`
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
 - event payload propagation through the current SDK `Event []byte` path

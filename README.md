@@ -27,7 +27,7 @@ Fabric-X blocks under `runtime/committer/ledger`.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
 - `GetTxID`, `GetChannelID`.
 - `stub.GetCreator`, `cid.GetMSPID`, `cid.GetID`, `stub.GetBinding`,
-  `stub.GetDecorations`.
+  `stub.GetDecorations`, `stub.GetSignedProposal`.
 - `CreateCompositeKey`, `SplitCompositeKey`.
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`.
 - One event payload through `SetEvent`.
@@ -161,6 +161,9 @@ Expected response fields:
 "creator_bytes": 800
 "binding_bytes": 32
 "decorations": { "compat.decorator": "orchestrator", ... }
+"signed_proposal_present": true
+"signed_proposal_bytes": ...
+"signed_proposal_signature_bytes": ... non-zero
 "client_id": "..."
 "chaincode_event": { "event_name": "log", ... }
 ```
@@ -169,7 +172,8 @@ Expected response fields:
 same chaincode invocation, so no setup `put` transactions are required. It also
 checks the current client identity path with `stub.GetCreator()`,
 `cid.GetMSPID(stub)`, `cid.GetID(stub)`, `stub.GetBinding()`, and
-`stub.GetDecorations()`.
+`stub.GetDecorations()`, and verifies that `stub.GetSignedProposal()` is
+available.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 again from the same client identity. The second response returns the same helper

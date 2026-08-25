@@ -1,8 +1,4 @@
-/*
-Copyright IBM Corp. All Rights Reserved.
-
-SPDX-License-Identifier: Apache-2.0
-*/
+//SPDX-License-Identifier: Apache-2.0
 
 package main
 
@@ -255,34 +251,47 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 		if err != nil {
 			return shim.Error(err.Error())
 		}
+		signedProposal, err := stub.GetSignedProposal()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		signedProposalBytes := 0
+		signedProposalSignatureBytes := 0
+		if signedProposal != nil {
+			signedProposalBytes = len(signedProposal.ProposalBytes)
+			signedProposalSignatureBytes = len(signedProposal.Signature)
+		}
 		decorations := byteMapToStrings(stub.GetDecorations())
 		payload, err := json.Marshal(map[string]any{
-			"args":                       byteArgsToStrings(stub.GetArgs()),
-			"string_args":                stub.GetStringArgs(),
-			"function":                   function,
-			"parameters":                 params,
-			"tx_id":                      stub.GetTxID(),
-			"channel_id":                 stub.GetChannelID(),
-			"creator_bytes":              len(creator),
-			"creator_base64":             base64.StdEncoding.EncodeToString(creator),
-			"client_id":                  clientID,
-			"client_msp_id":              clientMSPID,
-			"binding_bytes":              len(binding),
-			"binding_base64":             base64.StdEncoding.EncodeToString(binding),
-			"decorations":                decorations,
-			"committed_old_value":        nullableString(committedOldValue),
-			"committed_delete_old_value": nullableString(committedDeleteValue),
-			"seed_old_value":             seedOldValue,
-			"seed_delete_value":          seedDeleteValue,
-			"old_value":                  nullableString(oldValue),
-			"after_put_value":            nullableString(afterPutValue),
-			"delete_old_value":           nullableString(deleteOldValue),
-			"after_delete_value":         nullableString(afterDeleteValue),
-			"composite_key":              compositeKey,
-			"split_object_type":          splitObjectType,
-			"split_attributes":           splitAttributes,
-			"ok_status":                  shim.OK,
-			"error_status":               shim.ERROR,
+			"args":                            byteArgsToStrings(stub.GetArgs()),
+			"string_args":                     stub.GetStringArgs(),
+			"function":                        function,
+			"parameters":                      params,
+			"tx_id":                           stub.GetTxID(),
+			"channel_id":                      stub.GetChannelID(),
+			"creator_bytes":                   len(creator),
+			"creator_base64":                  base64.StdEncoding.EncodeToString(creator),
+			"client_id":                       clientID,
+			"client_msp_id":                   clientMSPID,
+			"binding_bytes":                   len(binding),
+			"binding_base64":                  base64.StdEncoding.EncodeToString(binding),
+			"decorations":                     decorations,
+			"signed_proposal_present":         signedProposal != nil,
+			"signed_proposal_bytes":           signedProposalBytes,
+			"signed_proposal_signature_bytes": signedProposalSignatureBytes,
+			"committed_old_value":             nullableString(committedOldValue),
+			"committed_delete_old_value":      nullableString(committedDeleteValue),
+			"seed_old_value":                  seedOldValue,
+			"seed_delete_value":               seedDeleteValue,
+			"old_value":                       nullableString(oldValue),
+			"after_put_value":                 nullableString(afterPutValue),
+			"delete_old_value":                nullableString(deleteOldValue),
+			"after_delete_value":              nullableString(afterDeleteValue),
+			"composite_key":                   compositeKey,
+			"split_object_type":               splitObjectType,
+			"split_attributes":                splitAttributes,
+			"ok_status":                       shim.OK,
+			"error_status":                    shim.ERROR,
 		})
 		if err != nil {
 			return shim.Error(err.Error())
