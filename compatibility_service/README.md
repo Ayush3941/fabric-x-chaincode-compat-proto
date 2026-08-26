@@ -94,7 +94,9 @@ GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
 steps. Run the client from another terminal with `FABRIC_LOGGING_SPEC=error`;
 client-side debug output is mostly gRPC internals.
 
-Submit a real compatibility invoke:
+Submit a real compatibility invoke.
+
+Without transient data:
 
 ```bash
 cd compatibility_service
@@ -104,15 +106,25 @@ FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
+With optional transient data:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
+```
+
 `compatv2` seeds the temporary old and delete values inside the same
 invocation, so no setup `put` transactions are required. It also checks
 `stub.GetCreator()`, `cid.GetMSPID(stub)`, `cid.GetID(stub)`,
-`stub.GetBinding()`, `stub.GetDecorations()`, and `stub.GetSignedProposal()`.
+`stub.GetBinding()`, `stub.GetDecorations()`, `stub.GetSignedProposal()`,
+`stub.GetTransient()`, and `stub.GetTxTimestamp()`.
 
 The final response should include `commit_status: "COMMITTED"`,
 `client_msp_id: "org-0"`, `binding_bytes: 32`, populated compatibility
-decorations, a present signed proposal, and non-empty creator/client identity
-fields.
+decorations, a timestamp, a present signed proposal, and non-empty
+creator/client identity fields. When transient data is supplied, the response
+should include those transient values.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 twice:
@@ -169,6 +181,7 @@ Implemented for the sample chaincode:
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
 - `GetTxID`, `GetChannelID`
 - `GetCreator`, `GetBinding`, `GetDecorations`, `GetSignedProposal`
+- `GetTransient`, `GetTxTimestamp`
 - `CreateCompositeKey`, `SplitCompositeKey`
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
 - event payload propagation through the current SDK `Event []byte` path

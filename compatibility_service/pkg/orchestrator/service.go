@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"compatibility_service/pkg/config"
@@ -69,6 +70,7 @@ type InvocationRequest struct {
 	ClientCreator        []byte               `json:"-"`
 	ClientNonce          []byte               `json:"-"`
 	ClientSignedProposal *peer.SignedProposal `json:"-"`
+	ClientTransient      map[string][]byte    `json:"-"`
 	IdempotencyKey       string               `json:"-"`
 	RequestDigest        string               `json:"-"`
 	Namespace            string               `json:"namespace,omitempty"`
@@ -646,6 +648,13 @@ func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) 
 	if inv.CCID != nil {
 		req.Namespace = inv.CCID.Name
 	}
+	if inv.Proposal != nil {
+		cpp, err := protoutil.UnmarshalChaincodeProposalPayload(inv.Proposal.Payload)
+		if err != nil {
+			return InvocationRequest{}, fmt.Errorf("unmarshal proposal payload: %w", err)
+		}
+		req.ClientTransient = cloneByteMap(cpp.TransientMap)
+	}
 	for _, arg := range inv.Args[1:] {
 		req.Args = append(req.Args, string(arg))
 	}
@@ -750,6 +759,7 @@ func requestDigest(channel, namespace string, req InvocationRequest, submit bool
 	for _, arg := range req.Args {
 		writeDigestString(h, arg)
 	}
+	writeDigestByteMap(h, req.ClientTransient)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -762,6 +772,18 @@ func writeDigestBytes(h interface{ Write([]byte) (int, error) }, value []byte) {
 	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
 	_, _ = h.Write(size[:])
 	_, _ = h.Write(value)
+}
+
+func writeDigestByteMap(h interface{ Write([]byte) (int, error) }, values map[string][]byte) {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		writeDigestString(h, key)
+		writeDigestBytes(h, values[key])
+	}
 }
 
 func protocolOrDefault(protocol string) string {
@@ -786,4 +808,15 @@ func cloneSignedProposal(prop *peer.SignedProposal) *peer.SignedProposal {
 		ProposalBytes: append([]byte(nil), prop.ProposalBytes...),
 		Signature:     append([]byte(nil), prop.Signature...),
 	}
+}
+
+func cloneByteMap(in map[string][]byte) map[string][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(in))
+	for key, value := range in {
+		out[key] = append([]byte(nil), value...)
+	}
+	return out
 }

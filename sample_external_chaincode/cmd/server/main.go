@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hyperledger/fabric-chaincode-go/v2/pkg/cid"
 	"github.com/hyperledger/fabric-chaincode-go/v2/shim"
@@ -251,6 +252,14 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 		if err != nil {
 			return shim.Error(err.Error())
 		}
+		transient, err := stub.GetTransient()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		txTimestamp, err := stub.GetTxTimestamp()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
 		signedProposal, err := stub.GetSignedProposal()
 		if err != nil {
 			return shim.Error(err.Error())
@@ -275,6 +284,11 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 			"client_msp_id":                   clientMSPID,
 			"binding_bytes":                   len(binding),
 			"binding_base64":                  base64.StdEncoding.EncodeToString(binding),
+			"transient":                       byteMapToStrings(transient),
+			"transient_count":                 len(transient),
+			"tx_timestamp_seconds":            txTimestamp.GetSeconds(),
+			"tx_timestamp_nanos":              txTimestamp.GetNanos(),
+			"tx_timestamp_rfc3339":            timestampString(txTimestamp.GetSeconds(), txTimestamp.GetNanos()),
 			"decorations":                     decorations,
 			"signed_proposal_present":         signedProposal != nil,
 			"signed_proposal_bytes":           signedProposalBytes,
@@ -364,6 +378,13 @@ func byteMapToStrings(values map[string][]byte) map[string]string {
 		res[key] = string(value)
 	}
 	return res
+}
+
+func timestampString(seconds int64, nanos int32) string {
+	if seconds == 0 && nanos == 0 {
+		return ""
+	}
+	return time.Unix(seconds, int64(nanos)).UTC().Format(time.RFC3339Nano)
 }
 
 func nullableString(value []byte) any {

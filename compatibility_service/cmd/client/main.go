@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,7 +17,10 @@ import (
 
 	"compatibility_service/pkg/config"
 	"compatibility_service/pkg/orchestrator"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
+	"github.com/hyperledger/fabric-x-common/protoutil"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
 	"github.com/spf13/cobra"
@@ -45,8 +49,9 @@ type Config struct {
 // txInput is the JSON format for the transaction argument.
 // It follows the Fabric peer CLI convention: function name plus arguments.
 type txInput struct {
-	Function string   `json:"Function"`
-	Args     []string `json:"Args"`
+	Function  string            `json:"Function"`
+	Args      []string          `json:"Args"`
+	Transient map[string]string `json:"Transient"`
 }
 
 func main() {
@@ -79,19 +84,21 @@ func newQueryCmd() *cobra.Command {
 		Short: "Send a read-only proposal and print the response payload",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _, txArgs, err := prepare(cmd, args[0])
+			cfg, _, txArgs, transient, err := prepare(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs)
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs, transient)
 			if err != nil {
 				return err
 			}
 			if res.Status < 200 || res.Status >= 400 {
 				return fmt.Errorf("orchestrator returned error status %d: %s", res.Status, res.Message)
 			}
-			cmd.Print(res.Payload)
+			if len(res.Payload) > 0 {
+				fmt.Fprintln(os.Stdout, res.Payload)
+			}
 			return nil
 		},
 	}
@@ -107,12 +114,12 @@ helper execution path, submits the Fabric-X transaction, waits for Notification
 Service finality, and returns the final status.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _, txArgs, err := prepare(cmd, args[0])
+			cfg, _, txArgs, transient, err := prepare(cmd, args[0])
 			if err != nil {
 				return err
 			}
 			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs)
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs, transient)
 			if err != nil {
 				return err
 			}
@@ -120,7 +127,7 @@ Service finality, and returns the final status.`,
 			if err != nil {
 				return err
 			}
-			cmd.Print(string(out))
+			fmt.Fprintln(os.Stdout, string(out))
 			return nil
 		},
 	}
@@ -128,16 +135,16 @@ Service finality, and returns the final status.`,
 }
 
 // prepare loads config and parses the transaction JSON — shared by query and invoke.
-func prepare(cmd *cobra.Command, txJSON string) (Config, txInput, [][]byte, error) {
+func prepare(cmd *cobra.Command, txJSON string) (Config, txInput, [][]byte, map[string][]byte, error) {
 	cfg, err := loadConfig(cmd)
 	if err != nil {
-		return Config{}, txInput{}, nil, err
+		return Config{}, txInput{}, nil, nil, err
 	}
-	tx, txArgs, err := parseTxArgs(txJSON)
+	tx, txArgs, transient, err := parseTxArgs(txJSON)
 	if err != nil {
-		return Config{}, txInput{}, nil, err
+		return Config{}, txInput{}, nil, nil, err
 	}
-	return cfg, tx, txArgs, nil
+	return cfg, tx, txArgs, transient, nil
 }
 
 func loadConfig(cmd *cobra.Command) (Config, error) {
@@ -163,10 +170,10 @@ func loadConfig(cmd *cobra.Command) (Config, error) {
 	return cfg, nil
 }
 
-func parseTxArgs(txJSON string) (txInput, [][]byte, error) {
+func parseTxArgs(txJSON string) (txInput, [][]byte, map[string][]byte, error) {
 	var tx txInput
 	if err := json.Unmarshal([]byte(txJSON), &tx); err != nil {
-		return txInput{}, nil, fmt.Errorf("invalid transaction JSON: %w", err)
+		return txInput{}, nil, nil, fmt.Errorf("invalid transaction JSON: %w", err)
 	}
 	txArgs := make([][]byte, 0, 1+len(tx.Args))
 	if tx.Function != "" {
@@ -175,7 +182,14 @@ func parseTxArgs(txJSON string) (txInput, [][]byte, error) {
 	for _, a := range tx.Args {
 		txArgs = append(txArgs, []byte(a))
 	}
-	return tx, txArgs, nil
+	transient := make(map[string][]byte, len(tx.Transient))
+	for key, value := range tx.Transient {
+		transient[key] = []byte(value)
+	}
+	if len(transient) == 0 {
+		transient = nil
+	}
+	return tx, txArgs, transient, nil
 }
 
 func validate(cfg Config) error {
@@ -194,7 +208,7 @@ func validate(cfg Config) error {
 	return nil
 }
 
-func callOrchestrator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte) (orchestrator.InvocationResponse, error) {
+func callOrchestrator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte, transient map[string][]byte) (orchestrator.InvocationResponse, error) {
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
@@ -204,7 +218,7 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, operation stri
 		return orchestrator.InvocationResponse{}, fmt.Errorf("unknown orchestrator operation %q", operation)
 	}
 
-	prop, err := network.NewSignedProposal(signer, cfg.ChannelID, namespace, "1.0", txArgs)
+	prop, err := newSignedProposal(signer, cfg.ChannelID, namespace, "1.0", txArgs, transient)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("create signed proposal: %w", err)
 	}
@@ -229,6 +243,61 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, operation stri
 		return orchestrator.InvocationResponse{}, fmt.Errorf("decode orchestrator grpc response: %w", err)
 	}
 	return out, nil
+}
+
+func newSignedProposal(
+	signer interface {
+		Sign([]byte) ([]byte, error)
+		Serialize() ([]byte, error)
+	},
+	channel,
+	namespace,
+	nsVersion string,
+	args [][]byte,
+	transient map[string][]byte,
+) (*peer.SignedProposal, error) {
+	creator, err := signer.Serialize()
+	if err != nil {
+		return nil, err
+	}
+
+	nonce, err := newNonce()
+	if err != nil {
+		return nil, err
+	}
+
+	proposal, _, err := protoutil.CreateChaincodeProposalWithTxIDNonceAndTransient(
+		protoutil.ComputeTxID(nonce, creator),
+		common.HeaderType_ENDORSER_TRANSACTION,
+		channel,
+		&peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				Type: peer.ChaincodeSpec_CAR,
+				ChaincodeId: &peer.ChaincodeID{
+					Name:    namespace,
+					Version: nsVersion,
+				},
+				Input: &peer.ChaincodeInput{
+					Args: args,
+				},
+			},
+		},
+		nonce,
+		creator,
+		transient,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return protoutil.GetSignedProposal(proposal, signer)
+}
+
+func newNonce() ([]byte, error) {
+	nonce := make([]byte, 24)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return nonce, nil
 }
 
 func namespaceOrDefault(cmd *cobra.Command, cfgNamespace string) string {

@@ -143,7 +143,9 @@ Important endpoints:
 
 ## Run The Demo
 
-From `compatibility_service`, run the current compatibility path:
+From `compatibility_service`, run the current compatibility path.
+
+Without transient data:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke \
@@ -151,7 +153,15 @@ FABRIC_LOGGING_SPEC=error ./bin/client invoke \
   '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
-Expected response fields:
+With optional transient data:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client invoke \
+  -c sampleconfig/client.yaml \
+  '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
+```
+
+Expected response fields for both:
 
 ```text
 "status": 200
@@ -164,6 +174,8 @@ Expected response fields:
 "signed_proposal_present": true
 "signed_proposal_bytes": ...
 "signed_proposal_signature_bytes": ... non-zero
+"tx_timestamp_rfc3339": "..."
+"transient_count": ...
 "client_id": "..."
 "chaincode_event": { "event_name": "log", ... }
 ```
@@ -172,8 +184,8 @@ Expected response fields:
 same chaincode invocation, so no setup `put` transactions are required. It also
 checks the current client identity path with `stub.GetCreator()`,
 `cid.GetMSPID(stub)`, `cid.GetID(stub)`, `stub.GetBinding()`, and
-`stub.GetDecorations()`, and verifies that `stub.GetSignedProposal()` is
-available.
+`stub.GetDecorations()`. It also verifies proposal-carried data through
+`stub.GetSignedProposal()`, `stub.GetTransient()`, and `stub.GetTxTimestamp()`.
 
 To check the current idempotency prototype, run the same `compatv2` invoke
 again from the same client identity. The second response returns the same helper
@@ -226,7 +238,8 @@ FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
 A successful `compatv2` block should show a Fabric-X `MESSAGE` envelope with an
-`applicationpb.Tx`, one endorsement, event metadata, and writes for:
+`applicationpb.Tx`, one endorsement, event metadata, and writes for the selected
+keys. For the no-transient example:
 
 ```text
 asset-v2 -> "value-v2"
