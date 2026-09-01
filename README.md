@@ -115,7 +115,7 @@ cd compatibility_service
 ```
 
 Terminal 2 prints the service logs. Look for loggers named `orchestrator`,
-`helper`, and `shim`. Some `grpc` logs can also appear in the same terminal.
+`helper`, and `shim`  `grpc` .
 
 ```text
 orchestrator: client proposal, helper call, submit, finality
@@ -128,8 +128,7 @@ Gateway-style request deadline around helper execution, submit, and finality.
 It must be greater than or equal to `finality-timeout`.
 
 Use Terminal 3 for the demo client commands in the next section. The JSON
-response examples are printed by the client in Terminal 3. Keep client logging
-quiet; `DEBUG` on the client mostly prints gRPC internals.
+response examples are printed by the client in Terminal 3.`DEBUG` on the client prints gRPC internals.
 
 Important endpoints:
 
@@ -177,8 +176,7 @@ The client prints a large JSON response in Terminal 3. Verify these fields:
 "chaincode_event": { "event_name": "log", ... }
 ```
 
-`compatv2` is self-contained. It seeds `old-value` and `delete-me` inside the
-same chaincode invocation, so no setup `put` transactions are required. It also
+`compatv2` is self-contained. It also
 checks the current client identity path with `stub.GetCreator()`,
 `cid.GetMSPID(stub)`, `cid.GetID(stub)`, `stub.GetBinding()`, and
 `stub.GetDecorations()`. It also verifies proposal-carried data through
@@ -253,7 +251,7 @@ Stop the Fabric-X containers:
 ./scripts/stop-network.sh
 ```
 
-Stop local V1 processes:
+Stop local V2 processes:
 
 ```bash
 pkill -f 'sample-chaincode'
