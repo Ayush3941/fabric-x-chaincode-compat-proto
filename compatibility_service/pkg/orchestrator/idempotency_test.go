@@ -71,7 +71,7 @@ func TestIdempotencyStoreReplaysFailure(t *testing.T) {
 	}
 }
 
-func TestRequestDigestIgnoresClientTxID(t *testing.T) {
+func TestRequestDigestIncludesClientTxID(t *testing.T) {
 	req1 := InvocationRequest{
 		ClientTxID:    "client-tx-1",
 		ClientCreator: []byte("creator"),
@@ -83,10 +83,11 @@ func TestRequestDigestIgnoresClientTxID(t *testing.T) {
 
 	digest1 := requestDigest("channelqc4", "0", req1, true)
 	digest2 := requestDigest("channelqc4", "0", req2, true)
-	if digest1 != digest2 {
-		t.Fatalf("retry digest should ignore client tx id: %s != %s", digest1, digest2)
+	if digest1 == digest2 {
+		t.Fatal("different client tx ids should produce different digest")
 	}
 
+	req2.ClientTxID = req1.ClientTxID
 	req2.Args[1] = "different-value"
 	digest3 := requestDigest("channelqc4", "0", req2, true)
 	if digest1 == digest3 {

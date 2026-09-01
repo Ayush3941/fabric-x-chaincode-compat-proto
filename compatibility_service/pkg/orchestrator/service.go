@@ -752,6 +752,7 @@ func requestDigest(channel, namespace string, req InvocationRequest, submit bool
 	h := sha256.New()
 	writeDigestString(h, "v2")
 	writeDigestString(h, operationName(submit))
+	writeDigestString(h, req.ClientTxID)
 	writeDigestString(h, channel)
 	writeDigestString(h, namespace)
 	writeDigestString(h, req.Function)

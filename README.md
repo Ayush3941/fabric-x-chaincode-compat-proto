@@ -90,46 +90,46 @@ The default namespace is `0` with policy `OR('org-0.member')`.
 cd compatibility_service
 go build -o bin/client ./cmd/client
 go build -o bin/orchestrator ./cmd/orchestrator
-
 cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
-
 cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
-## Start V1 Services
+## Start Services
 
-Use two terminals from the repository root.
+Use two service terminals from the repository root.
 
-Terminal 1:
+Terminal 1 starts the external chaincode service:
 
 ```bash
 cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Terminal 2, orchestrator with normal foreground logs:
+Terminal 2 starts the compatibility service:
 
 ```bash
 cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-The orchestrator terminal shows the full service-side trace:
+Terminal 2 prints the service logs. Look for loggers named `orchestrator`,
+`helper`, and `shim`. Some `grpc` logs can also appear in the same terminal.
 
 ```text
-[orchestrator] client proposal, helper call, submit, finality
-[helper] proposal parse, execution result, Fabric-X endorsement
-[shim] CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
+orchestrator: client proposal, helper call, submit, finality
+helper: proposal parse, execution result, Fabric-X endorsement
+shim: CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
 ```
 
 `sampleconfig/orchestrator.yaml` sets `request-timeout: 45s`. That is the full
 Gateway-style request deadline around helper execution, submit, and finality.
 It must be greater than or equal to `finality-timeout`.
 
-Run the client from a third terminal. Keep client logging quiet; `DEBUG` on the
-client mostly prints gRPC internals.
+Use Terminal 3 for the demo client commands in the next section. The JSON
+response examples are printed by the client in Terminal 3. Keep client logging
+quiet; `DEBUG` on the client mostly prints gRPC internals.
 
 Important endpoints:
 
@@ -143,25 +143,22 @@ Important endpoints:
 
 ## Run The Demo
 
-From `compatibility_service`, run the current compatibility path.
+Run these commands from Terminal 3.
 
 Without transient data:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
-  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+cd compatibility_service
+FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
 With optional transient data:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
-  '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
+FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
 ```
 
-Expected response fields for both:
+The client prints a large JSON response in Terminal 3. Verify these fields:
 
 ```text
 "status": 200
@@ -187,32 +184,16 @@ checks the current client identity path with `stub.GetCreator()`,
 `stub.GetDecorations()`. It also verifies proposal-carried data through
 `stub.GetSignedProposal()`, `stub.GetTransient()`, and `stub.GetTxTimestamp()`.
 
-To check the current idempotency prototype, run the same `compatv2` invoke
-again from the same client identity. The second response returns the same helper
-transaction result, includes `"idempotent_replay": true`, and does not submit
-another Fabric-X transaction. The current store is in-memory and is reset when
-the orchestrator restarts.
-
-```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
-  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
-
-FABRIC_LOGGING_SPEC=error ./bin/client invoke \
-  -c sampleconfig/client.yaml \
-  '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
-```
+The idempotency key now includes the client transaction ID. Re-running the same
+CLI command creates a fresh nonce and tx_id, so it is treated as a new
+transaction. A duplicate delivery of the same signed proposal is replayed from
+the orchestrator's in-memory idempotency store.
 
 Verify final state:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client query \
-  -c sampleconfig/client.yaml \
-  '{"Function":"get","Args":["asset-v2"]}'
-
-FABRIC_LOGGING_SPEC=error ./bin/client query \
-  -c sampleconfig/client.yaml \
-  '{"Function":"get","Args":["asset-v2-delete"]}'
+FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-v2"]}'
+FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-v2-delete"]}'
 ```
 
 Expected:
