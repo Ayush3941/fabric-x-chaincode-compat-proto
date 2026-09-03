@@ -291,7 +291,7 @@ func New(cfg ServiceConfig, mspDir, mspID string, executors map[string]Executor,
 
 // NewWithSigner creates a new Service with an already-constructed signer.
 func NewWithSigner(cfg ServiceConfig, signer sdk.Signer, executors map[string]Executor, logger sdk.Logger) (*Service, error) {
-	if cfg.Protocol != "" && cfg.Protocol != "fabric-x" {
+	if cfg.Protocol != "fabric-x" {
 		return nil, fmt.Errorf("protocol %q is not supported by stateless helper", cfg.Protocol)
 	}
 

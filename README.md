@@ -98,24 +98,23 @@ go build -o bin/block-dump ./cmd/block-dump
 
 ## Start Services
 
-Use two service terminals from the repository root.
+Use three terminals. Commands are shown from the repository root.
 
-Terminal 1 starts the external chaincode service:
+Terminal 1 runs the external chaincode service:
 
 ```bash
 cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Terminal 2 starts the compatibility service:
+Terminal 2 runs the compatibility service:
 
 ```bash
 cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-Terminal 2 prints the service logs. Look for loggers named `orchestrator`,
-`helper`, and `shim`  `grpc` .
+Terminal 2 prints service logs. The important project loggers are:
 
 ```text
 orchestrator: client proposal, helper call, submit, finality
@@ -127,8 +126,9 @@ shim: CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
 Gateway-style request deadline around helper execution, submit, and finality.
 It must be greater than or equal to `finality-timeout`.
 
-Use Terminal 3 for the demo client commands in the next section. The JSON
-response examples are printed by the client in Terminal 3.`DEBUG` on the client prints gRPC internals.
+Terminal 3 runs the demo client from `compatibility_service`. Client JSON
+responses print in Terminal 3. Keep client logging quiet; `DEBUG` mostly prints
+gRPC internals.
 
 Important endpoints:
 
@@ -142,75 +142,69 @@ Important endpoints:
 
 ## Run The Demo
 
-Run these commands from Terminal 3.
-
-Without transient data:
+Terminal 3, without transient data:
 
 ```bash
 cd compatibility_service
 FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
 ```
 
-With optional transient data:
+Terminal 3, with transient data:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
 ```
 
-The client prints a large JSON response in Terminal 3. Verify these fields:
+`compatv2` is a test function in
+`sample_external_chaincode/cmd/server/main.go`. It is ordinary Fabric Go
+chaincode code running through `shim.ChaincodeServer`. It seeds temporary
+values, reads committed state, writes and deletes keys, checks read-your-writes,
+checks Fabric shim context APIs, and sets one event payload.
+
+The client prints a large JSON response. The structure looks like this:
+
+```json
+{
+  "tx_id": "...",
+  "status": 200,
+  "payload": "{\"function\":\"compatv2\",\"args\":[...],\"client_msp_id\":\"org-0\",\"binding_bytes\":32,\"signed_proposal_present\":true,\"transient_count\":0,...}",
+  "payload_base64": "...",
+  "submitted": true,
+  "commit_status": "COMMITTED",
+  "block_num": 12,
+  "idempotency_key": "...",
+  "chaincode_event": {
+    "chaincode_id": "0",
+    "tx_id": "...",
+    "event_name": "log",
+    "payload": "{\"function\":\"compatv2\",\"key\":\"asset-v2\",\"value\":\"value-v2\",...}",
+    "payload_base64": "..."
+  }
+}
+```
+
+Inside the `payload` string, verify these values:
 
 ```text
-"status": 200
-"submitted": true
-"commit_status": "COMMITTED"
-"client_msp_id": "org-0"
-"creator_bytes": 800
-"binding_bytes": 32
-"decorations": { "compat.decorator": "orchestrator", ... }
-"signed_proposal_present": true
-"signed_proposal_bytes": ...
-"signed_proposal_signature_bytes": ... non-zero
-"tx_timestamp_rfc3339": "..."
-"transient_count": ...
-"client_id": "..."
-"chaincode_event": { "event_name": "log", ... }
+client_msp_id = org-0
+binding_bytes = 32
+decorations contains compat.decorator and compat.namespace
+signed_proposal_present = true
+signed_proposal_signature_bytes is non-zero
+tx_timestamp_rfc3339 is present
+transient_count is 0 without transient data, or 2 with the transient example
 ```
-
-`compatv2` is self-contained. It also
-checks the current client identity path with `stub.GetCreator()`,
-`cid.GetMSPID(stub)`, `cid.GetID(stub)`, `stub.GetBinding()`, and
-`stub.GetDecorations()`. It also verifies proposal-carried data through
-`stub.GetSignedProposal()`, `stub.GetTransient()`, and `stub.GetTxTimestamp()`.
-
-The idempotency key now includes the client transaction ID. Re-running the same
-CLI command creates a fresh nonce and tx_id, so it is treated as a new
-transaction. A duplicate delivery of the same signed proposal is replayed from
-the orchestrator's in-memory idempotency store.
-
-Verify final state:
-
-```bash
-FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-v2"]}'
-FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-v2-delete"]}'
-```
-
-Expected:
-
-```text
-value-v2
-```
-
-The second query should print an empty payload because the key was deleted.
 
 ## Inspect Blocks
 
-Dump all current blocks:
+Repository root:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -from 0
 ```
 
-Dump one transaction:
+Dump a specific transaction by copying `tx_id` from the Terminal 3 client
+response and replacing `<tx_id>`:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
@@ -227,16 +221,25 @@ asset-v2-delete -> <nil>
 
 ## Tests
 
-Run tests from package roots:
+Repository root:
+
+```bash
+cd compatibility_service
+go test ./...
+cd ..
+```
+
+```bash
+cd sample_external_chaincode
+go test ./...
+cd ..
+```
+
+Root command packages currently act as compile checks and may print
+`[no test files]`:
 
 ```bash
 go test ./cmd/...
-
-cd compatibility_service
-go test ./...
-
-cd ../sample_external_chaincode
-go test ./...
 ```
 
 Avoid `go test ./...` from the repository root after the network has started,
@@ -245,13 +248,13 @@ discovery.
 
 ## Stop And Clean
 
-Stop the Fabric-X containers:
+Repository root:
 
 ```bash
 ./scripts/stop-network.sh
 ```
 
-Stop local V2 processes:
+Stop local prototype processes:
 
 ```bash
 pkill -f 'sample-chaincode'

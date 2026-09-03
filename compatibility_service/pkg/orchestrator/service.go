@@ -290,7 +290,6 @@ func (s *Service) Close() error {
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client. The
 // operation is carried as gRPC metadata so the proposal itself remains the exact
-// chaincode proposal that will be exposed through stub.GetSignedProposal().
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
 	if err != nil {
@@ -326,10 +325,11 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		if errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Warnf("tx=%s request deadline exceeded timeout=%s", inv.TxID, requestTimeout)
 			return nil, status.Error(codes.DeadlineExceeded, "orchestrator request deadline exceeded")
-		}
-		if errors.Is(err, context.Canceled) {
+		
+		} else if errors.Is(err, context.Canceled) {
 			return nil, status.Error(codes.Canceled, "orchestrator request canceled")
 		}
+
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -348,10 +348,11 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	}, nil
 }
 
-// Execute runs one query or invoke through helper endorsement. Invokes are also
-// packaged and submitted to Fabric-X.
+// Execute runs one query or invoke through helper endorsement
+// Invokes are packaged and submitted to Fabric-X.
 func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit bool) (InvocationResponse, error) {
 	namespace := req.Namespace
+	// TODO: need to modify the fallback once proper lifecycle is set up
 	if namespace == "" {
 		namespace = s.cfg.Namespace
 	}
@@ -471,6 +472,7 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 		return sdk.Endorsement{}, errors.New("internal helper is not configured")
 	}
 	prop := clientProposal.SignedProposal
+	// temporary fallback for tests and stuff
 	if prop == nil {
 		var err error
 		prop, err = network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
