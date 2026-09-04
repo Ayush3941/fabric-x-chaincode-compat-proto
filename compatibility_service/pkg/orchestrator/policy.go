@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	common "github.com/hyperledger/fabric-protos-go-apiv2/common"
@@ -147,33 +148,11 @@ func cloneNamespacePolicySnapshot(in NamespacePolicySnapshot) NamespacePolicySna
 }
 
 func localMSPSatisfiesNamespacePolicy(policy NamespacePolicySnapshot, localMSPID string) (bool, string, error) {
-	if localMSPID == "" {
-		return false, "", errors.New("local MSP ID is required")
+	plan, rule, err := namespacePolicyPlan(policy, localMSPID, nil)
+	if err != nil {
+		return false, rule, err
 	}
-	if policy.Policy == nil {
-		return false, "", fmt.Errorf("namespace %q policy is nil", policy.Namespace)
-	}
-
-	switch rule := policy.Policy.GetRule().(type) {
-	case *applicationpb.NamespacePolicy_MspRule:
-		env := &common.SignaturePolicyEnvelope{}
-		if err := proto.Unmarshal(rule.MspRule, env); err != nil {
-			return false, "msp", fmt.Errorf("decode namespace %q MSP policy: %w", policy.Namespace, err)
-		}
-		satisfied, err := signaturePolicySatisfied(env.GetRule(), env.GetIdentities(), localMSPID)
-		if err != nil {
-			return false, "msp", fmt.Errorf("evaluate namespace %q MSP policy: %w", policy.Namespace, err)
-		}
-		return satisfied, "msp", nil
-	case *applicationpb.NamespacePolicy_ThresholdRule:
-		scheme := ""
-		if rule.ThresholdRule != nil {
-			scheme = rule.ThresholdRule.GetScheme()
-		}
-		return false, "threshold", fmt.Errorf("namespace %q uses threshold policy %q; current orchestrator only supports MSP policy routing", policy.Namespace, scheme)
-	default:
-		return false, "", fmt.Errorf("namespace %q has unsupported policy rule %T", policy.Namespace, rule)
-	}
+	return plan.satisfied && len(plan.remoteMSPs) == 0, rule, nil
 }
 
 func signaturePolicySatisfied(rule *common.SignaturePolicy, identities []*mspapi.MSPPrincipal, localMSPID string) (bool, error) {
@@ -217,16 +196,136 @@ func signaturePolicySatisfied(rule *common.SignaturePolicy, identities []*mspapi
 }
 
 func principalMatchesLocalMSP(principal *mspapi.MSPPrincipal, localMSPID string) (bool, error) {
+	mspID, err := principalMSPID(principal)
+	if err != nil {
+		return false, err
+	}
+	return mspID == localMSPID, nil
+}
+
+type namespacePolicyExecutionPlan struct {
+	satisfied  bool
+	remoteMSPs []string
+}
+
+func namespacePolicyPlan(policy NamespacePolicySnapshot, localMSPID string, availableRemoteMSPs map[string]struct{}) (namespacePolicyExecutionPlan, string, error) {
+	if localMSPID == "" {
+		return namespacePolicyExecutionPlan{}, "", errors.New("local MSP ID is required")
+	}
+	if policy.Policy == nil {
+		return namespacePolicyExecutionPlan{}, "", fmt.Errorf("namespace %q policy is nil", policy.Namespace)
+	}
+
+	switch rule := policy.Policy.GetRule().(type) {
+	case *applicationpb.NamespacePolicy_MspRule:
+		env := &common.SignaturePolicyEnvelope{}
+		if err := proto.Unmarshal(rule.MspRule, env); err != nil {
+			return namespacePolicyExecutionPlan{}, "msp", fmt.Errorf("decode namespace %q MSP policy: %w", policy.Namespace, err)
+		}
+		plan, err := signaturePolicyPlan(env.GetRule(), env.GetIdentities(), localMSPID, availableRemoteMSPs)
+		if err != nil {
+			return namespacePolicyExecutionPlan{}, "msp", fmt.Errorf("evaluate namespace %q MSP policy: %w", policy.Namespace, err)
+		}
+		return plan, "msp", nil
+	case *applicationpb.NamespacePolicy_ThresholdRule:
+		scheme := ""
+		if rule.ThresholdRule != nil {
+			scheme = rule.ThresholdRule.GetScheme()
+		}
+		return namespacePolicyExecutionPlan{}, "threshold", fmt.Errorf("namespace %q uses threshold policy %q; current orchestrator only supports MSP policy routing", policy.Namespace, scheme)
+	default:
+		return namespacePolicyExecutionPlan{}, "", fmt.Errorf("namespace %q has unsupported policy rule %T", policy.Namespace, rule)
+	}
+}
+
+func signaturePolicyPlan(rule *common.SignaturePolicy, identities []*mspapi.MSPPrincipal, localMSPID string, availableRemoteMSPs map[string]struct{}) (namespacePolicyExecutionPlan, error) {
+	if rule == nil {
+		return namespacePolicyExecutionPlan{}, errors.New("policy rule is nil")
+	}
+
+	switch ruleType := rule.GetType().(type) {
+	case *common.SignaturePolicy_SignedBy:
+		index := int(ruleType.SignedBy)
+		if index < 0 || index >= len(identities) {
+			return namespacePolicyExecutionPlan{}, fmt.Errorf("signed_by index %d out of range", ruleType.SignedBy)
+		}
+		mspID, err := principalMSPID(identities[index])
+		if err != nil {
+			return namespacePolicyExecutionPlan{}, err
+		}
+		if mspID == localMSPID {
+			return namespacePolicyExecutionPlan{satisfied: true}, nil
+		}
+		if _, ok := availableRemoteMSPs[mspID]; ok {
+			return namespacePolicyExecutionPlan{satisfied: true, remoteMSPs: []string{mspID}}, nil
+		}
+		return namespacePolicyExecutionPlan{}, nil
+	case *common.SignaturePolicy_NOutOf_:
+		noutof := ruleType.NOutOf
+		if noutof == nil {
+			return namespacePolicyExecutionPlan{}, errors.New("n_out_of rule is nil")
+		}
+		required := int(noutof.N)
+		if required <= 0 {
+			return namespacePolicyExecutionPlan{satisfied: true}, nil
+		}
+
+		childPlans := make([]namespacePolicyExecutionPlan, 0, len(noutof.Rules))
+		for _, child := range noutof.Rules {
+			plan, err := signaturePolicyPlan(child, identities, localMSPID, availableRemoteMSPs)
+			if err != nil {
+				return namespacePolicyExecutionPlan{}, err
+			}
+			if plan.satisfied {
+				childPlans = append(childPlans, plan)
+			}
+		}
+		if len(childPlans) < required {
+			return namespacePolicyExecutionPlan{}, nil
+		}
+		sort.SliceStable(childPlans, func(i, j int) bool {
+			left, right := childPlans[i].remoteMSPs, childPlans[j].remoteMSPs
+			if len(left) != len(right) {
+				return len(left) < len(right)
+			}
+			return fmt.Sprint(left) < fmt.Sprint(right)
+		})
+
+		selected := make(map[string]struct{})
+		for i := 0; i < required; i++ {
+			for _, mspID := range childPlans[i].remoteMSPs {
+				selected[mspID] = struct{}{}
+			}
+		}
+		return namespacePolicyExecutionPlan{satisfied: true, remoteMSPs: sortedMSPIDs(selected)}, nil
+	default:
+		return namespacePolicyExecutionPlan{}, fmt.Errorf("unsupported signature policy rule %T", ruleType)
+	}
+}
+
+func principalMSPID(principal *mspapi.MSPPrincipal) (string, error) {
 	if principal == nil {
-		return false, errors.New("principal is nil")
+		return "", errors.New("principal is nil")
 	}
 	if principal.GetPrincipalClassification() != mspapi.MSPPrincipal_ROLE {
-		return false, fmt.Errorf("unsupported principal classification %s", principal.GetPrincipalClassification())
+		return "", fmt.Errorf("unsupported principal classification %s", principal.GetPrincipalClassification())
 	}
 
 	role := &mspapi.MSPRole{}
 	if err := proto.Unmarshal(principal.GetPrincipal(), role); err != nil {
-		return false, fmt.Errorf("decode MSP role principal: %w", err)
+		return "", fmt.Errorf("decode MSP role principal: %w", err)
 	}
-	return role.GetMspIdentifier() == localMSPID, nil
+	return role.GetMspIdentifier(), nil
+}
+
+func sortedMSPIDs(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }

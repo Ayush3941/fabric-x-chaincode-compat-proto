@@ -24,6 +24,17 @@ if [ -d "${PROJECT_ROOT}/runtime/committer" ]; then
       -c 'rm -rf /runtime/committer'
   }
 fi
+rm -rf \
+  "${PROJECT_ROOT}/runtime/compatibility_service" \
+  "${PROJECT_ROOT}/compatibility_service/runtime" \
+  "${PROJECT_ROOT}/sample_external_chaincode/runtime" \
+  "${PROJECT_ROOT}/compatibility_service/bin" \
+  "${PROJECT_ROOT}/sample_external_chaincode/bin" \
+  "${PROJECT_ROOT}/bin/block-dump" \
+  "${PROJECT_ROOT}/bin/rws-smoke" \
+  "${PROJECT_ROOT}/.tmp" \
+  "${PROJECT_ROOT}/.gocache" \
+  "${PROJECT_ROOT}/third_party/.build"
 mkdir -p "${PROJECT_ROOT}/artifacts" "${PROJECT_ROOT}/storage" "${PROJECT_ROOT}/runtime/logs"
 
-echo "Cleaned Project runtime artifacts"
+echo "Cleaned Project generated artifacts, runtime state, and build caches"

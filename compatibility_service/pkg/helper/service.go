@@ -355,6 +355,9 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 
 	executor, ok := s.executors[inv.CCID.Name]
 	if !ok {
+		executor, ok = s.executors["*"]
+	}
+	if !ok {
 		s.logger.Infof("tx=%s err=unknown namespace: %s", inv.TxID, inv.CCID.Name)
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("unknown namespace: %s", inv.CCID.Name))
 	}

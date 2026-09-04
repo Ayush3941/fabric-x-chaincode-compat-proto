@@ -213,6 +213,25 @@ func dumpFabricXTx(data []byte) {
 		len(tx.Endorsements),
 		len(tx.Metadata),
 	)
+	for idx, endorsements := range tx.Endorsements {
+		if endorsements == nil {
+			fmt.Printf("      endorsements[%d] signers=0\n", idx)
+			continue
+		}
+		signers := endorsements.GetEndorsementsWithIdentity()
+		fmt.Printf("      endorsements[%d] signers=%d\n", idx, len(signers))
+		for signerIdx, signer := range signers {
+			mspID := "<nil>"
+			if signer.GetIdentity() != nil {
+				mspID = signer.GetIdentity().GetMspId()
+			}
+			fmt.Printf("        signer[%d] msp_id=%s signature_bytes=%d\n",
+				signerIdx,
+				mspID,
+				len(signer.GetEndorsement()),
+			)
+		}
+	}
 	if len(tx.Metadata) > 1 && len(tx.Metadata[1]) > 0 {
 		var event peer.ChaincodeEvent
 		if err := proto.Unmarshal(tx.Metadata[1], &event); err != nil {

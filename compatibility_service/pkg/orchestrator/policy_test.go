@@ -255,6 +255,92 @@ func TestLocalMSPSatisfiesNamespacePolicyRejectsThresholdRule(t *testing.T) {
 	}
 }
 
+func TestNamespacePolicyPlanSelectsRemoteMSPs(t *testing.T) {
+	available := map[string]struct{}{
+		"org-1": {},
+		"org-2": {},
+	}
+	tests := []struct {
+		name      string
+		rule      *common.SignaturePolicy
+		expected  []string
+		satisfied bool
+	}{
+		{
+			name:      "local only",
+			rule:      signedBy(0),
+			satisfied: true,
+		},
+		{
+			name: "and selects org1",
+			rule: nOutOf(2,
+				signedBy(0),
+				signedBy(1),
+			),
+			expected:  []string{"org-1"},
+			satisfied: true,
+		},
+		{
+			name: "outof selects one remote",
+			rule: nOutOf(2,
+				signedBy(0),
+				signedBy(1),
+				signedBy(2),
+			),
+			expected:  []string{"org-1"},
+			satisfied: true,
+		},
+		{
+			name: "remote only or selects first configured branch",
+			rule: nOutOf(1,
+				signedBy(1),
+				signedBy(2),
+			),
+			expected:  []string{"org-1"},
+			satisfied: true,
+		},
+		{
+			name: "nested selects remote branch",
+			rule: nOutOf(1,
+				signedBy(2),
+				nOutOf(2,
+					signedBy(0),
+					signedBy(1),
+				),
+			),
+			expected:  []string{"org-1"},
+			satisfied: true,
+		},
+		{
+			name: "unavailable remote is unsatisfied",
+			rule: nOutOf(2,
+				signedBy(0),
+				signedBy(3),
+			),
+			satisfied: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := mspPolicySnapshot(t, test.rule)
+			plan, rule, err := namespacePolicyPlan(policy, "org-0", available)
+			if err != nil {
+				t.Fatalf("namespacePolicyPlan returned error: %v", err)
+			}
+			if rule != "msp" {
+				t.Fatalf("expected msp rule, got %q", rule)
+			}
+			if plan.satisfied != test.satisfied {
+				t.Fatalf("expected satisfied=%t, got %t", test.satisfied, plan.satisfied)
+			}
+			if strings.Join(plan.remoteMSPs, ",") != strings.Join(test.expected, ",") {
+				t.Fatalf("expected remotes=%v, got %v", test.expected, plan.remoteMSPs)
+			}
+		})
+	}
+}
+
 func marshalPolicy(t *testing.T, policy *applicationpb.NamespacePolicy) []byte {
 	t.Helper()
 	raw, err := proto.Marshal(policy)
@@ -271,6 +357,7 @@ func mspPolicySnapshot(t *testing.T, rule *common.SignaturePolicy) NamespacePoli
 			rolePrincipal(t, "org-0"),
 			rolePrincipal(t, "org-1"),
 			rolePrincipal(t, "org-2"),
+			rolePrincipal(t, "org-3"),
 		},
 		Rule: rule,
 	}

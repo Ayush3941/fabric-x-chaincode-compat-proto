@@ -43,6 +43,7 @@ const (
 	GRPCOperationMetadata = "x-compat-operation"
 	GRPCOperationInvoke   = "invoke"
 	GRPCOperationQuery    = "query"
+	GRPCOperationEndorse  = "endorse"
 )
 
 // Config contains the orchestrator wiring.
@@ -56,9 +57,37 @@ type Config struct {
 	ChaincodeSvc    config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
 	Orderer         *config.ClientConfig          `mapstructure:"orderer"`
 	NotificationSvc *config.ClientConfig          `mapstructure:"notification-service"`
+	RemoteOrgs      []RemoteOrchestratorConfig    `mapstructure:"remote-orchestrators"`
 	WaitAfterSubmit time.Duration                 `mapstructure:"wait-after-submit"`
 	RequestTimeout  time.Duration                 `mapstructure:"request-timeout"`
 	FinalityTimeout time.Duration                 `mapstructure:"finality-timeout"`
+}
+
+// RemoteOrchestratorConfig is a static V2 routing entry for one organization.
+type RemoteOrchestratorConfig struct {
+	MSPID    string           `mapstructure:"msp-id"`
+	Endpoint *config.Endpoint `mapstructure:"endpoint"`
+	TLS      config.TLSConfig `mapstructure:"tls"`
+}
+
+func (c RemoteOrchestratorConfig) Address() string {
+	if c.Endpoint == nil {
+		return ""
+	}
+	return c.Endpoint.Address()
+}
+
+func (c RemoteOrchestratorConfig) ToPeerConf() network.PeerConf {
+	return network.PeerConf{
+		Address: c.Address(),
+		TLS: network.TLSConfig{
+			Mode:        c.TLS.Mode,
+			CertPath:    c.TLS.CertPath,
+			KeyPath:     c.TLS.KeyPath,
+			CACertPaths: c.TLS.CACertPaths,
+			ServerName:  c.TLS.ServerName,
+		},
+	}
 }
 
 // InvocationRequest is the orchestrator's internal normalized request after a
@@ -166,9 +195,10 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		Protocol:     cfg.Protocol,
 		QueryService: cfg.QueryService.ToPeerConf(),
 	}
-	helper, err := helper.NewWithSigner(helperCfg, signer, map[string]helper.Executor{
-		cfg.Namespace: helper.NewChaincodeServiceExecutor(shimConnector),
-	}, helperLogger)
+	executors := map[string]helper.Executor{
+		"*": helper.NewChaincodeServiceExecutor(shimConnector),
+	}
+	helper, err := helper.NewWithSigner(helperCfg, signer, executors, helperLogger)
 	if err != nil {
 		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create internal helper: %w", err)
@@ -205,7 +235,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	orchestratorLogger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
+	orchestratorLogger.Infof("orchestrator initialized channel=%s default_namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
 		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
 	return &Service{
 		cfg:          cfg,
@@ -228,9 +258,6 @@ func (cfg Config) Validate() error {
 	if cfg.ChannelID == "" {
 		errs = append(errs, errors.New("channel-id is required"))
 	}
-	if cfg.Namespace == "" {
-		errs = append(errs, errors.New("namespace is required"))
-	}
 	if cfg.Identity == nil {
 		errs = append(errs, errors.New("identity is required"))
 	}
@@ -250,6 +277,14 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.NotificationSvc == nil || cfg.NotificationSvc.Endpoint == nil {
 		errs = append(errs, errors.New("notification-service.endpoint is required"))
+	}
+	for i, remote := range cfg.RemoteOrgs {
+		if remote.MSPID == "" {
+			errs = append(errs, fmt.Errorf("remote-orchestrators[%d].msp-id is required", i))
+		}
+		if remote.Endpoint == nil || remote.Endpoint.Host == "" || remote.Endpoint.Port == 0 {
+			errs = append(errs, fmt.Errorf("remote-orchestrators[%d].endpoint is required", i))
+		}
 	}
 	if cfg.RequestTimeout < 0 {
 		errs = append(errs, errors.New("request-timeout must not be negative"))
@@ -319,10 +354,11 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("channel must be %s", s.cfg.ChannelID))
 	}
 
-	submit, err := operationFromContext(ctx)
+	operation, err := operationFromContext(ctx)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	submit := operation == GRPCOperationInvoke
 
 	req, err := requestFromProposal(inv)
 	if err != nil {
@@ -333,12 +369,26 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	req.ClientNonce = append([]byte(nil), inv.Nonce...)
 	req.ClientSignedProposal = cloneSignedProposal(prop)
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
-		inv.TxID, operationName(submit), inv.Channel, req.Namespace, req.Function, len(req.Args))
+		inv.TxID, operation, inv.Channel, req.Namespace, req.Function, len(req.Args))
 
 	requestTimeout := s.cfg.requestTimeout()
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	s.logger.Debugf("tx=%s request deadline started timeout=%s", inv.TxID, requestTimeout)
+
+	if operation == GRPCOperationEndorse {
+		resp, err := s.EndorseOnly(requestCtx, req)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				s.logger.Warnf("tx=%s request deadline exceeded timeout=%s", inv.TxID, requestTimeout)
+				return nil, status.Error(codes.DeadlineExceeded, "orchestrator request deadline exceeded")
+			} else if errors.Is(err, context.Canceled) {
+				return nil, status.Error(codes.Canceled, "orchestrator request canceled")
+			}
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return resp, nil
+	}
 
 	res, err := s.Execute(requestCtx, req, submit)
 	if err != nil {
@@ -367,20 +417,31 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	}, nil
 }
 
+// EndorseOnly executes the local helper path and returns the helper's Fabric-X
+// endorsement response without submitting to the orderer.
+func (s *Service) EndorseOnly(ctx context.Context, req InvocationRequest) (*peer.ProposalResponse, error) {
+	namespace, args, err := s.prepareInvocation(req)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.executeFresh(ctx, req, namespace, args)
+	if err != nil {
+		return nil, fmt.Errorf("helper endorsement failed: %w", err)
+	}
+	if len(result.Endorsement.Responses) == 0 || result.Endorsement.Responses[0] == nil {
+		return nil, errors.New("helper returned no proposal response")
+	}
+	s.logger.Infof("tx=%s execute-only endorsement completed namespace=%s status=%d",
+		result.TxID, namespace, result.Response.Status)
+	return result.Endorsement.Responses[0], nil
+}
+
 // Execute runs one query or invoke through helper endorsement
 // Invokes are packaged and submitted to Fabric-X.
 func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit bool) (out InvocationResponse, err error) {
-	namespace := req.Namespace
-	// TODO: need to modify the fallback once proper lifecycle is set up
-	if namespace == "" {
-		namespace = s.cfg.Namespace
-	}
-	if namespace == "" {
-		return InvocationResponse{}, errors.New("namespace is required")
-	}
-	args := invocationArgs(req)
-	if len(args) == 0 {
-		return InvocationResponse{}, errors.New("function is required")
+	namespace, args, err := s.prepareInvocation(req)
+	if err != nil {
+		return InvocationResponse{}, err
 	}
 
 	var record *idempotencyRecord
@@ -430,7 +491,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return out, nil
 	}
 
-	remoteResults, err := s.requestRemoteOrchestratorsIfPolicyNeedsThem(ctx, policy, localResult)
+	remoteResults, err := s.requestRemoteOrchestratorsIfPolicyNeedsThem(ctx, policy, req, localResult)
 	if err != nil {
 		return out, err
 	}
@@ -444,6 +505,22 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 
 	out, err = s.submitAndWaitFinality(ctx, merged, out, localResult.TxID, record)
 	return out, err
+}
+
+func (s *Service) prepareInvocation(req InvocationRequest) (string, [][]byte, error) {
+	namespace := req.Namespace
+	// TODO: need to modify the fallback once proper lifecycle is set up.
+	if namespace == "" {
+		namespace = s.cfg.Namespace
+	}
+	if namespace == "" {
+		return "", nil, errors.New("namespace is required")
+	}
+	args := invocationArgs(req)
+	if len(args) == 0 {
+		return "", nil, errors.New("function is required")
+	}
+	return namespace, args, nil
 }
 
 func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, clientProposal helper.ClientProposalContext) (sdk.Endorsement, error) {
@@ -603,18 +680,20 @@ func invocationArgs(req InvocationRequest) [][]byte {
 	return args
 }
 
-func operationFromContext(ctx context.Context) (bool, error) {
+func operationFromContext(ctx context.Context) (string, error) {
 	values := metadata.ValueFromIncomingContext(ctx, GRPCOperationMetadata)
 	if len(values) == 0 {
-		return false, fmt.Errorf("missing %s metadata", GRPCOperationMetadata)
+		return "", fmt.Errorf("missing %s metadata", GRPCOperationMetadata)
 	}
 	switch values[0] {
 	case GRPCOperationInvoke:
-		return true, nil
+		return GRPCOperationInvoke, nil
 	case GRPCOperationQuery:
-		return false, nil
+		return GRPCOperationQuery, nil
+	case GRPCOperationEndorse:
+		return GRPCOperationEndorse, nil
 	default:
-		return false, fmt.Errorf("unknown orchestrator operation %q", values[0])
+		return "", fmt.Errorf("unknown orchestrator operation %q", values[0])
 	}
 }
 

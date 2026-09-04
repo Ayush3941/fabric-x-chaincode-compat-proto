@@ -1,62 +1,64 @@
 # Fabric-X Chaincode Compatibility Prototype
 
-This repository is a real-network V1 prototype for running an unchanged Go
-Fabric chaincode against Fabric-X infrastructure.
+Prototype for running unchanged Go Fabric chaincode against Fabric-X.
 
-The V1 flow is:
+CCAAS means Fabric chaincode running as an external service. A Fabric-X
+namespace is the state and policy target used by the demo transaction. The
+orchestrator accepts the client proposal, runs chaincode through the helper
+path, collects required org endorsements, submits, and waits for finality.
+
+Current flow:
 
 ```text
-client CLI
--> orchestrator gRPC endpoint
--> internal helper execution path
--> external Fabric chaincode-as-a-service
--> Fabric-X Query Service for reads
--> local read/write capture
--> Fabric-X transaction submit
--> Notification Service finality
--> block inspection
+client CLI -> org0 orchestrator -> org0 CCAAS
+                         |
+                         -> org1 orchestrator -> org1 CCAAS
+                         |
+                         -> merge matching endorsements -> orderer -> committer -> notification finality
 ```
 
-This is not a mock ledger. The orderer and committer containers create real
-Fabric-X blocks under `runtime/committer/ledger`.
+The ledger is real. Committed blocks are stored under `runtime/committer/ledger`
+and can be inspected with `bin/block-dump`.
 
 ## What Works
 
-- External Go chaincode using the normal Fabric shim server.
-- `GetState`, `PutState`, `DelState`, and read-your-writes behavior.
+- External Go chaincode through `shim.ChaincodeServer`.
+- Two organization static endorsement path: `org-0` and `org-1`.
+- Namespace policy lookup from Fabric-X Query Service.
+- Remote orchestrator execution when policy needs another MSP.
+- Result matching before submit.
+- Merged Fabric-X SDK endorsement responses.
+- Fabric-X orderer submission and Notification Service finality.
+- `GetState`, `PutState`, `DelState`, read-your-writes.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
-- `GetTxID`, `GetChannelID`.
-- `stub.GetCreator`, `cid.GetMSPID`, `cid.GetID`, `stub.GetBinding`,
-  `stub.GetDecorations`, `stub.GetSignedProposal`.
+- `GetTxID`, `GetChannelID`, `GetCreator`, `GetBinding`, `GetDecorations`.
+- `GetSignedProposal`, `GetTransient`, `GetTxTimestamp`.
 - `CreateCompositeKey`, `SplitCompositeKey`.
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`.
 - One event payload through `SetEvent`.
-- Real Fabric-X transaction submission and committed-status confirmation.
 
-Known V1 limitation: Fabric-X SDK event metadata currently keeps the event
-payload, but the committed event name is the SDK default `log`.
+Known limitation: Fabric-X SDK event metadata keeps the payload, but the
+committed event name is currently the SDK default `log`.
 
-## Repository Layout
+## Layout
 
 ```text
-compatibility_service/       orchestrator, internal helper packages, client CLI
-sample_external_chaincode/   sample external Go chaincode service
-cmd/block-dump/              readable block inspection tool
-cmd/rws-smoke/               lower-level Fabric-X RW-set smoke client
+compatibility_service/       orchestrator, embedded helper path, client CLI
+sample_external_chaincode/   external Go chaincode service
+cmd/block-dump/              readable committed block dump
+cmd/rws-smoke/               low-level Fabric-X RW-set smoke client
 scripts/                     build, setup, start, stop helpers
-fxconfig/                    namespace setup config template
+fxconfig/                    namespace setup configs
 networkconfig/               crypto and channel config inputs
-committerconfig/             Fabric-X committer container configs
-ordererconfig/               Arma orderer config templates
+committerconfig/             Fabric-X committer configs
+ordererconfig/               Arma orderer configs
 artifacts/                   generated crypto/config artifacts, ignored
 runtime/                     logs and committer ledger, ignored
 storage/                     Arma runtime storage, ignored
 bin/                         generated Fabric-X tools, ignored
 ```
 
-## Prerequisites
-
-Install these on the host:
+## Requirements
 
 ```text
 docker
@@ -67,13 +69,24 @@ nc
 openssl
 ```
 
-By default, `scripts/build-images.sh` clones pinned Fabric-X sources into
-`third_party/.build`. To build from sibling local checkouts instead, run it with
-`USE_LOCAL_REPOS=1`.
+By default `scripts/build-images.sh` clones pinned Fabric-X sources into
+`third_party/.build`. Use `USE_LOCAL_REPOS=1` only if you want sibling local
+checkouts.
+
+## Fabric-X Code Used
+
+- `scripts/build-images.sh` uses pinned `fabric-x`, `fabric-x-orderer`, and
+  `fabric-x-committer` sources under `third_party/.build`.
+- `scripts/create-namespace.sh` uses the generated `bin/fxconfig` tool and the
+  configs under `fxconfig/`.
+- Runtime endorsement, submit, network, and identity helpers come from
+  `github.com/hyperledger/fabric-x-sdk`.
+- Fabric-X protobufs and block helpers come from
+  `github.com/hyperledger/fabric-x-common`.
 
 ## Fresh Setup
 
-From the repository root:
+Run from the repository root:
 
 ```bash
 ./scripts/build-images.sh
@@ -82,9 +95,15 @@ From the repository root:
 ./scripts/create-namespace.sh
 ```
 
-The default namespace is `0` with policy `OR('org-0.member')`.
+The last command creates namespace `0` with `OR('org-0.member')` and namespace
+`1` with `AND('org-0.member','org-1.member')`.
 
-## Build Prototype Binaries
+The namespace setup transactions are signed by both app orgs. That is separate
+from the policy stored inside each namespace.
+
+## Build
+
+Run from the repository root:
 
 ```bash
 cd compatibility_service
@@ -98,171 +117,204 @@ go build -o bin/block-dump ./cmd/block-dump
 
 ## Start Services
 
-Use three terminals. Commands are shown from the repository root.
+Use four service terminals and one client terminal.
 
-Terminal 1 runs the external chaincode service:
+The first two terminals run the external chaincode services. The next two run
+the org orchestrators and show service logs. The client terminal runs the demo
+commands and prints the JSON response.
+
+Service terminal 1, org0 chaincode:
 
 ```bash
 cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
 ```
 
-Terminal 2 runs the compatibility service:
+Service terminal 2, org1 chaincode:
+
+```bash
+cd sample_external_chaincode
+./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:10000
+```
+
+Service terminal 3, org0 orchestrator:
 
 ```bash
 cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-Terminal 2 prints service logs. The important project loggers are:
-
-```text
-orchestrator: client proposal, helper call, submit, finality
-helper: proposal parse, execution result, Fabric-X endorsement
-shim: CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
-```
-
-`sampleconfig/orchestrator.yaml` sets `request-timeout: 45s`. That is the full
-Gateway-style request deadline around helper execution, submit, and finality.
-It must be greater than or equal to `finality-timeout`.
-
-Terminal 3 runs the demo client from `compatibility_service`. Client JSON
-responses print in Terminal 3. Keep client logging quiet; `DEBUG` mostly prints
-gRPC internals.
-
-Important endpoints:
-
-```text
-9999  external chaincode service
-9102  orchestrator, with internal helper execution
-4001  Notification Service / committer sidecar
-7001  Query Service
-6022  Arma orderer router
-```
-
-## Run The Demo
-
-Terminal 3, without transient data:
+Service terminal 4, org1 orchestrator:
 
 ```bash
 cd compatibility_service
-FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
+./bin/orchestrator -c sampleconfig/orchestrator1.yaml --log-level DEBUG
 ```
 
-Terminal 3, with transient data:
+The orchestrator terminals show `[orchestrator]`, `[helper]`, `[shim]`, and
+`[grpc]` logs.
+
+Example service log lines:
+
+```text
+[orchestrator] ProcessProposal -> tx=... operation=invoke channel=channelqc4 namespace=1 fn=compatv2 args=3
+[helper] ProcessProposal -> tx=... chaincode execution completed status=200 reads=2 writes=2
+[shim] sendTransaction -> tx=... shim TRANSACTION sent ccid=0:sample fn=compatv2 args=3
+[grpc] AddTraceEvent -> [core] [Channel #...] Channel Connectivity change to READY
+[orchestrator] submitAndWaitFinality -> tx=... finality status=COMMITTED block=3 txnum=0
+```
+
+Useful ports:
+
+```text
+9999   org0 chaincode service
+10000  org1 chaincode service
+9102   org0 orchestrator
+9202   org1 orchestrator
+4001   Notification Service / block query
+7001   Query Service
+6022   Arma orderer router
+```
+
+## Run Compatv2
+
+Run from `compatibility_service` in the client terminal:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
+```
+
+With transient data:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
 ```
 
-`compatv2` is a test function in
-`sample_external_chaincode/cmd/server/main.go`. It is ordinary Fabric Go
-chaincode code running through `shim.ChaincodeServer`. It seeds temporary
-values, reads committed state, writes and deletes keys, checks read-your-writes,
-checks Fabric shim context APIs, and sets one event payload.
+`compatv2` is implemented in
+`sample_external_chaincode/cmd/server/main.go`. It is normal Fabric chaincode
+code. It checks state operations, context APIs, transient data, timestamp,
+signed proposal, composite keys, and event payload while using the same
+chaincode service path as the rest of the prototype.
 
-The client prints a large JSON response. The structure looks like this:
+The client terminal prints JSON like this:
 
 ```json
 {
   "tx_id": "...",
   "status": 200,
-  "payload": "{\"function\":\"compatv2\",\"args\":[...],\"client_msp_id\":\"org-0\",\"binding_bytes\":32,\"signed_proposal_present\":true,\"transient_count\":0,...}",
+  "payload": "...",
   "payload_base64": "...",
   "submitted": true,
   "commit_status": "COMMITTED",
-  "block_num": 12,
+  "block_num": 3,
   "idempotency_key": "...",
   "chaincode_event": {
-    "chaincode_id": "0",
-    "tx_id": "...",
     "event_name": "log",
-    "payload": "{\"function\":\"compatv2\",\"key\":\"asset-v2\",\"value\":\"value-v2\",...}",
-    "payload_base64": "..."
+    "payload": "..."
   }
 }
 ```
 
-Inside the `payload` string, verify these values:
+Important values inside the returned `payload` string:
 
 ```text
-client_msp_id = org-0
-binding_bytes = 32
-decorations contains compat.decorator and compat.namespace
-signed_proposal_present = true
-signed_proposal_signature_bytes is non-zero
-tx_timestamp_rfc3339 is present
-transient_count is 0 without transient data, or 2 with the transient example
+client_msp_id: org-0
+binding_bytes: 32
+signed_proposal_present: true
+signed_proposal_signature_bytes: non-zero
+transient_count: 0, or 2 when using the transient example
 ```
 
-## Inspect Blocks
+Repeated in-flight requests with the same transaction context wait on the
+stored result instead of running twice. The service log shows this duplicate
+request handling, also called idempotency:
 
-Repository root:
+```text
+[orchestrator] Execute -> idempotency_key=... duplicate request detected; waiting for stored result
+```
+
+## Verify State
+
+Run from `compatibility_service`:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -from 0
+FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-multiorg-v2"]}'
 ```
 
-Dump a specific transaction by copying `tx_id` from the Terminal 3 client
-response and replacing `<tx_id>`:
+Expected:
+
+```text
+value-multiorg-v2
+```
+
+Run:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-multiorg-v2-delete"]}'
+```
+
+Expected: empty output.
+
+## Inspect Block
+
+Run from the repository root:
+
+```bash
+txid=$(python3 -c 'import json; print(json.load(open("runtime/compatibility_service/compatv2-result.json"))["tx_id"])')
+FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid "$txid"
+```
+
+Without the saved result file, copy the `tx_id` printed by the client and run:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
-A successful `compatv2` block should show a Fabric-X `MESSAGE` envelope with an
-`applicationpb.Tx`, one endorsement, event metadata, and writes for the selected
-keys. For the no-transient example:
+Expected block shape:
 
 ```text
-asset-v2 -> "value-v2"
-asset-v2-delete -> <nil>
+Envelope type=MESSAGE/0 channel=channelqc4
+data: applicationpb.Tx namespaces=1 endorsements=1 metadata=2
+endorsements[0] signers=2
+signer[0] msp_id=org-0
+signer[1] msp_id=org-1
+read_write key="asset-multiorg-v2" value="value-multiorg-v2"
+read_write key="asset-multiorg-v2-delete" value=<nil>
 ```
+
+`endorsements=1` means one endorsement bucket for one namespace. The signer
+lines show the actual two organization signatures.
 
 ## Tests
 
-Repository root:
+Run from the repository root:
 
 ```bash
 cd compatibility_service
-go test ./...
+go test ./pkg/orchestrator ./pkg/shim
 cd ..
-```
-
-```bash
-cd sample_external_chaincode
-go test ./...
-cd ..
-```
-
-Root command packages currently act as compile checks and may print
-`[no test files]`:
-
-```bash
-go test ./cmd/...
 ```
 
 Avoid `go test ./...` from the repository root after the network has started,
-because Docker-owned files under `storage/` can confuse recursive package
-discovery.
+because Docker-owned files under `storage/` can interfere with recursive
+package discovery.
 
-## Stop And Clean
+## Stop
 
-Repository root:
+Run from the client terminal after the demo:
 
 ```bash
+cd ..
 ./scripts/stop-network.sh
-```
-
-Stop local prototype processes:
-
-```bash
 pkill -f 'sample-chaincode'
 pkill -f '/bin/orchestrator'
 ```
 
-Delete generated artifacts and runtime state:
+Full cleanup:
 
 ```bash
 ./scripts/clean.sh
 ```
+
+This removes generated artifacts, local runtime state, service binaries, and
+local build caches. Run the fresh setup and build commands again after it.
