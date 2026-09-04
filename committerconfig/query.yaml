@@ -11,6 +11,7 @@ server:
     key-path: /root/artifacts/peerOrganizations/peer-org-0/peers/query.peer-org-0/tls/server.key
     ca-cert-paths:
       - /root/artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
+      - /root/artifacts/peerOrganizations/peer-org-1/msp/tlscacerts/tlsca.peer-org-1-cert.pem
   rate-limit:
     requests-per-second: 0
     burst: 0

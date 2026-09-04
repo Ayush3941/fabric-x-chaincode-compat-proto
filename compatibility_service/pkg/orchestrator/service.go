@@ -45,9 +45,7 @@ const (
 	GRPCOperationQuery    = "query"
 )
 
-// Config contains the V1 orchestrator wiring. The orchestrator receives a small
-// invocation request, executes the internal helper path, and submits the
-// endorsed Fabric-X transaction to the orderer.
+// Config contains the orchestrator wiring.
 type Config struct {
 	ChannelID       string                        `mapstructure:"channel-id"`
 	Namespace       string                        `mapstructure:"namespace"`
@@ -105,14 +103,17 @@ type ChaincodeEvent struct {
 
 // Service is the orchestrator process.
 type Service struct {
-	cfg         Config
-	signer      sdk.Signer
-	helper      *helper.Service
-	submitter   *network.FabricSubmitter
-	notifier    *network.Peer
-	notify      committerpb.NotifierClient
-	idempotency *idempotencyStore
-	logger      sdk.Logger
+	cfg          Config
+	signer       sdk.Signer
+	helper       *helper.Service
+	queryPeer    *network.Peer
+	queryService committerpb.QueryServiceClient
+	policies     *namespacePolicyResolver
+	submitter    *network.FabricSubmitter
+	notifier     *network.Peer
+	notify       committerpb.NotifierClient
+	idempotency  *idempotencyStore
+	logger       sdk.Logger
 }
 
 // Loggers separates the deployable service logs by logical component.
@@ -146,8 +147,16 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		return nil, fmt.Errorf("load identity: %w", err)
 	}
 
+	queryPeer, err := network.NewPeer(cfg.QueryService.ToPeerConf())
+	if err != nil {
+		return nil, fmt.Errorf("query service: %w", err)
+	}
+	queryService := committerpb.NewQueryServiceClient(queryPeer.Connection())
+	policies := newNamespacePolicyResolver(queryService)
+
 	shimConnector, err := shim.NewConnector(shim.Config{Endpoint: cfg.ChaincodeSvc.Address()})
 	if err != nil {
+		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create shim connector: %w", err)
 	}
 	shimConnector.SetLogger(shimLogger)
@@ -161,6 +170,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		cfg.Namespace: helper.NewChaincodeServiceExecutor(shimConnector),
 	}, helperLogger)
 	if err != nil {
+		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create internal helper: %w", err)
 	}
 
@@ -172,10 +182,13 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	case "fabric-x", "":
 		submitter, err = nfabx.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
 	default:
+		helper.Close()    //nolint:errcheck
+		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("unknown protocol %q: must be \"fabric\" or \"fabric-x\"", cfg.Protocol)
 	}
 	if err != nil {
-		helper.Close() //nolint:errcheck
+		helper.Close()    //nolint:errcheck
+		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create submitter: %w", err)
 	}
 
@@ -186,6 +199,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		if err != nil {
 			submitter.Close() //nolint:errcheck
 			helper.Close()    //nolint:errcheck
+			queryPeer.Close() //nolint:errcheck
 			return nil, fmt.Errorf("notification service: %w", err)
 		}
 		notify = committerpb.NewNotifierClient(notifier.Connection())
@@ -194,18 +208,21 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	orchestratorLogger.Infof("orchestrator initialized channel=%s namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
 		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
 	return &Service{
-		cfg:         cfg,
-		signer:      signer,
-		helper:      helper,
-		submitter:   submitter,
-		notifier:    notifier,
-		notify:      notify,
-		idempotency: newIdempotencyStore(),
-		logger:      orchestratorLogger,
+		cfg:          cfg,
+		signer:       signer,
+		helper:       helper,
+		queryPeer:    queryPeer,
+		queryService: queryService,
+		policies:     policies,
+		submitter:    submitter,
+		notifier:     notifier,
+		notify:       notify,
+		idempotency:  newIdempotencyStore(),
+		logger:       orchestratorLogger,
 	}, nil
 }
 
-// Validate checks only the endpoints needed for the V1 flow.
+// Validate checks the endpoints needed for the current single-service flow.
 func (cfg Config) Validate() error {
 	var errs []error
 	if cfg.ChannelID == "" {
@@ -282,6 +299,9 @@ func (s *Service) Close() error {
 	if s.helper != nil {
 		errs = append(errs, s.helper.Close())
 	}
+	if s.queryPeer != nil {
+		errs = append(errs, s.queryPeer.Close())
+	}
 	if s.notifier != nil {
 		errs = append(errs, s.notifier.Close())
 	}
@@ -289,7 +309,7 @@ func (s *Service) Close() error {
 }
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client. The
-// operation is carried as gRPC metadata so the proposal itself remains the exact
+// operation is carried as gRPC metadata so the proposal payload stays Fabric-like.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
 	if err != nil {
@@ -325,7 +345,6 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		if errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Warnf("tx=%s request deadline exceeded timeout=%s", inv.TxID, requestTimeout)
 			return nil, status.Error(codes.DeadlineExceeded, "orchestrator request deadline exceeded")
-		
 		} else if errors.Is(err, context.Canceled) {
 			return nil, status.Error(codes.Canceled, "orchestrator request canceled")
 		}
@@ -350,19 +369,25 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 
 // Execute runs one query or invoke through helper endorsement
 // Invokes are packaged and submitted to Fabric-X.
-func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit bool) (InvocationResponse, error) {
+func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit bool) (out InvocationResponse, err error) {
 	namespace := req.Namespace
 	// TODO: need to modify the fallback once proper lifecycle is set up
 	if namespace == "" {
 		namespace = s.cfg.Namespace
 	}
+	if namespace == "" {
+		return InvocationResponse{}, errors.New("namespace is required")
+	}
 	args := invocationArgs(req)
 	if len(args) == 0 {
 		return InvocationResponse{}, errors.New("function is required")
 	}
+
+	var record *idempotencyRecord
 	if submit {
 		req.IdempotencyKey, req.RequestDigest = idempotencyIdentity(s.cfg.ChannelID, namespace, req, submit)
-		record, owner, err := s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
+		var owner bool
+		record, owner, err = s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
 		if err != nil {
 			return InvocationResponse{}, err
 		}
@@ -372,99 +397,53 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 			out.IdempotentReplay = true
 			return out, err
 		}
-
-		out, err := s.executeFresh(ctx, req, submit, namespace, args, record)
-		s.idempotency.complete(record, out, err)
-		return out, err
+		defer func() {
+			s.idempotency.complete(record, out, err)
+		}()
 	}
 
-	return s.executeFresh(ctx, req, submit, namespace, args, nil)
-}
-
-func (s *Service) executeFresh(
-	ctx context.Context,
-	req InvocationRequest,
-	submit bool,
-	namespace string,
-	args [][]byte,
-	record *idempotencyRecord,
-) (InvocationResponse, error) {
-	s.logger.Infof("orchestrator calling in-process helper operation=%s namespace=%s fn=%s args=%d",
-		operationName(submit), namespace, req.Function, len(req.Args))
-	clientProposal := helper.ClientProposalContext{
-		Creator:        req.ClientCreator,
-		Nonce:          req.ClientNonce,
-		SignedProposal: req.ClientSignedProposal,
-		Decorations:    compatibilityDecorations(namespace),
+	policy, err := s.resolveNamespacePolicy(ctx, namespace)
+	if err != nil {
+		return InvocationResponse{}, fmt.Errorf("resolve namespace policy: %w", err)
 	}
-	end, err := s.executeHelper(ctx, namespace, "1.0", args, clientProposal)
+
+	localResult, err := s.executeFresh(ctx, req, namespace, args)
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
-	txID, err := txIDFromEndorsement(end)
-	if err != nil {
-		return InvocationResponse{}, err
-	}
-	if req.ClientTxID != "" && req.ClientTxID != txID {
-		s.logger.Infof("client_tx=%s helper_tx=%s helper execution transaction id selected", req.ClientTxID, txID)
-	}
 	if record != nil {
-		s.idempotency.markExecuted(record, txID, end)
-	}
-	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
-		return InvocationResponse{}, errors.New("helper returned no proposal response")
+		s.idempotency.markExecuted(record, localResult.TxID, localResult.Endorsement)
 	}
 
-	resp := end.Responses[0].Response
-	out := responseFromPeer(txID, resp)
+	resp := localResult.Response
+	out = responseFromPeer(localResult.TxID, resp)
 	out.IdempotencyKey = req.IdempotencyKey
 	s.logger.Infof("tx=%s helper response status=%d payload_bytes=%d submit=%t",
-		txID, resp.Status, len(resp.Payload), submit)
+		localResult.TxID, resp.Status, len(resp.Payload), submit)
 	if resp.Status < 200 || resp.Status >= 400 {
-		s.logger.Infof("tx=%s chaincode returned non-success status=%d message=%q", txID, resp.Status, resp.Message)
+		s.logger.Infof("tx=%s chaincode returned non-success status=%d message=%q", localResult.TxID, resp.Status, resp.Message)
 		return out, nil
 	}
 	if !submit {
-		out.ChaincodeEvent = eventFromEndorsement(end, txID)
-		s.logger.Infof("tx=%s query completed status=%d", txID, resp.Status)
+		out.ChaincodeEvent = eventFromEndorsement(localResult.Endorsement, localResult.TxID)
+		s.logger.Infof("tx=%s query completed status=%d", localResult.TxID, resp.Status)
 		return out, nil
 	}
 
-	finality, err := s.subscribeFinality(ctx, txID)
+	remoteResults, err := s.requestRemoteOrchestratorsIfPolicyNeedsThem(ctx, policy, localResult)
 	if err != nil {
-		return out, fmt.Errorf("subscribe finality: %w", err)
+		return out, err
 	}
-	if finality != nil {
-		defer finality.Cancel()
+	if err := compareCanonicalResults(localResult, remoteResults); err != nil {
+		return out, err
 	}
-
-	s.logger.Infof("tx=%s submitting endorsed Fabric-X transaction", txID)
-	if err := s.submitter.Submit(ctx, end); err != nil {
-		return out, fmt.Errorf("submit failed: %w", err)
-	}
-	out.Submitted = true
-	if record != nil {
-		s.idempotency.markSubmitted(record, out)
-	}
-	s.logger.Infof("tx=%s submitted", txID)
-
-	status, err := finality.Wait()
+	merged, err := mergeEndorsements(localResult, remoteResults)
 	if err != nil {
-		s.logger.Warnf("tx=%s finality wait failed: %s", txID, err)
-		return out, nil
-	}
-	if status != nil {
-		out.CommitStatus = status.Status.String()
-		out.BlockNum = status.Ref.GetBlockNum()
-		out.TxNum = status.Ref.GetTxNum()
-		s.logger.Infof("tx=%s finality status=%s block=%d txnum=%d",
-			txID, out.CommitStatus, out.BlockNum, out.TxNum)
-		if status.Status == committerpb.Status_COMMITTED {
-			out.ChaincodeEvent = eventFromEndorsement(end, txID)
-		}
+		return out, err
 	}
 
-	return out, nil
+	out, err = s.submitAndWaitFinality(ctx, merged, out, localResult.TxID, record)
+	return out, err
 }
 
 func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, clientProposal helper.ClientProposalContext) (sdk.Endorsement, error) {

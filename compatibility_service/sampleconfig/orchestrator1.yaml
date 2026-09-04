@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+
+channel-id: channelqc4
+namespace: "0"
+protocol: fabric-x
+wait-after-submit: 0s
+request-timeout: 45s
+finality-timeout: 20s
+
+server:
+  endpoint:
+    host: 127.0.0.1
+    port: 9202
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
+      - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
+
+identity:
+  msp-id: org-1
+  msp-dir: ../artifacts/peerOrganizations/peer-org-1/users/client@peer-org-1/msp
+
+query-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 7001
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
+    server-name: 127.0.0.1
+
+chaincode-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 10000
+  tls:
+    mode: none
+
+orderer:
+  endpoint:
+    host: 127.0.0.1
+    port: 6022
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/ordererOrganizations/orderer-org-1/msp/tlscacerts/tlsca.orderer-org-1-cert.pem
+    server-name: 127.0.0.1
+
+notification-service:
+  endpoint:
+    host: 127.0.0.1
+    port: 4001
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
+    server-name: 127.0.0.1

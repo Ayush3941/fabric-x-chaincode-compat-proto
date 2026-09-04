@@ -68,7 +68,8 @@ docker run --rm --entrypoint armageddon \
 echo "Generating per-role Arma local configs"
 CONTAINER_ARTIFACTS="/tmp/arma-all-in-one"
 PEER_CA_EXTRA=$(printf '\\\n      - %s' \
-  "${CONTAINER_ARTIFACTS}/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem")
+  "${CONTAINER_ARTIFACTS}/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem" \
+  "${CONTAINER_ARTIFACTS}/peerOrganizations/peer-org-1/msp/tlscacerts/tlsca.peer-org-1-cert.pem")
 
 for i in 1 2 3 4; do
   PARTY_DIR="${ARTIFACTS_DIR}/config/party${i}"

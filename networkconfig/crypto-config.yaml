@@ -112,3 +112,16 @@ PeerOrgs:
       Count: 1
       Specs:
         - Name: client
+
+  - Name: peer-org-1
+    Domain: peer-org-1
+    EnableNodeOUs: false
+    CA:
+      Hostname: ca
+    Specs:
+      - Hostname: helper
+        SANS: [127.0.0.1, 0.0.0.0, localhost]
+    Users:
+      Count: 1
+      Specs:
+        - Name: client
