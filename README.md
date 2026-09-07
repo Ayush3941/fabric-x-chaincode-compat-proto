@@ -120,8 +120,8 @@ go build -o bin/block-dump ./cmd/block-dump
 Use four service terminals and one client terminal.
 
 The first two terminals run the external chaincode services. The next two run
-the org orchestrators and show service logs. The client terminal runs the demo
-commands and prints the JSON response.
+the org orchestrators and show service logs. Terminal 5 is the client terminal;
+it runs the demo commands and prints the JSON response.
 
 Service terminal 1, org0 chaincode:
 
@@ -178,7 +178,7 @@ Useful ports:
 
 ## Run Compatv2
 
-Run from `compatibility_service` in the client terminal:
+Run from `compatibility_service` in Terminal 5:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
@@ -235,7 +235,7 @@ request handling, also called idempotency:
 
 ## Verify State
 
-Run from `compatibility_service`:
+Run from `compatibility_service` in Terminal 5:
 
 ```bash
 FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-multiorg-v2"]}'
