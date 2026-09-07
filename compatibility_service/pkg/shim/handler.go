@@ -49,6 +49,9 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 
 		msg, err := h.stream.Recv()
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Result{}, ctxErr
+			}
 			if errors.Is(err, io.EOF) {
 				return Result{}, errors.New("chaincode stream closed before COMPLETED")
 			}

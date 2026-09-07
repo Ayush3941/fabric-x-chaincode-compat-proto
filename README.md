@@ -287,13 +287,27 @@ lines show the actual two organization signatures.
 
 ## Tests
 
-Run from the repository root:
+Run unit tests from the repository root:
 
 ```bash
 cd compatibility_service
 go test ./pkg/orchestrator ./pkg/shim
 cd ..
 ```
+
+Run the real-network integration tests after Fresh Setup:
+
+```bash
+cd compatibility_service
+FABRIC_LOGGING_SPEC=error go test -tags=e2e ./integration/e2e -count=1 -v
+cd ..
+```
+
+The integration tests build `sample_external_chaincode/cmd/e2e-server`, start
+temporary chaincode/orchestrator processes on high local ports, and cover
+duplicate request handling, remote org unavailable, mismatched org result,
+timeout before submit, and retry after completed result. Test logs are written
+under `runtime/compatibility_service/e2e`.
 
 Avoid `go test ./...` from the repository root after the network has started,
 because Docker-owned files under `storage/` can interfere with recursive
