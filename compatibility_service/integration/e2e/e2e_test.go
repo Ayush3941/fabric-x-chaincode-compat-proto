@@ -211,6 +211,47 @@ func TestRetryAfterCompletedResultDoesNotSubmitAgain(t *testing.T) {
 	}
 }
 
+func TestSameTxIDDifferentRequestConflicts(t *testing.T) {
+	h := newHarness(t, harnessOptions{
+		name:        "same-txid-conflict",
+		requestWait: "45s",
+		finality:    "25s",
+	})
+
+	before := h.blockHeight(t)
+	nonce := randomNonce(t)
+	key := uniqueKey(t, "conflict")
+	deleteKey := uniqueKey(t, "delete")
+	prop1, txID1 := h.newSignedProposalWithNonce(t, nonce, "compatv2", key, "value-one", deleteKey)
+	prop2, txID2 := h.newSignedProposalWithNonce(t, nonce, "compatv2", key, "value-two", deleteKey)
+	if txID1 != txID2 {
+		t.Fatalf("same nonce and creator produced different tx IDs: %s vs %s", txID1, txID2)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	first, err := h.invokeSigned(ctx, prop1)
+	if err != nil {
+		t.Fatalf("first invoke failed: %v", err)
+	}
+	if first.CommitStatus != "COMMITTED" {
+		t.Fatalf("first invoke status = %q", first.CommitStatus)
+	}
+	afterFirst := h.waitForHeight(t, first.BlockNum+1)
+	if afterFirst != before+1 {
+		t.Fatalf("expected first invoke to add one block, before=%d after=%d", before, afterFirst)
+	}
+
+	_, err = h.invokeSigned(ctx, prop2)
+	if err == nil {
+		t.Fatal("expected same tx id with different args to be rejected")
+	}
+	if !strings.Contains(err.Error(), "idempotency conflict") {
+		t.Fatalf("expected idempotency conflict, got: %v", err)
+	}
+	assertHeightUnchanged(t, h, afterFirst)
+}
+
 type harnessOptions struct {
 	name         string
 	disableOrg1  bool
@@ -470,6 +511,11 @@ func (h *e2eHarness) invokeSigned(ctx context.Context, prop *peer.SignedProposal
 
 func (h *e2eHarness) newSignedProposal(t *testing.T, function string, args ...string) (*peer.SignedProposal, string) {
 	t.Helper()
+	return h.newSignedProposalWithNonce(t, randomNonce(t), function, args...)
+}
+
+func (h *e2eHarness) newSignedProposalWithNonce(t *testing.T, nonce []byte, function string, args ...string) (*peer.SignedProposal, string) {
+	t.Helper()
 	signer, err := identity.SignerFromMSP(h.clientMSP(0), "org-0")
 	if err != nil {
 		t.Fatalf("load client signer: %v", err)
@@ -477,10 +523,6 @@ func (h *e2eHarness) newSignedProposal(t *testing.T, function string, args ...st
 	creator, err := signer.Serialize()
 	if err != nil {
 		t.Fatalf("serialize client signer: %v", err)
-	}
-	nonce := make([]byte, 24)
-	if _, err := rand.Read(nonce); err != nil {
-		t.Fatalf("create nonce: %v", err)
 	}
 
 	inputArgs := make([][]byte, 0, 1+len(args))
@@ -516,6 +558,15 @@ func (h *e2eHarness) newSignedProposal(t *testing.T, function string, args ...st
 		t.Fatalf("sign proposal: %v", err)
 	}
 	return prop, txID
+}
+
+func randomNonce(t *testing.T) []byte {
+	t.Helper()
+	nonce := make([]byte, 24)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatalf("create nonce: %v", err)
+	}
+	return nonce
 }
 
 func (h *e2eHarness) blockHeight(t *testing.T) uint64 {

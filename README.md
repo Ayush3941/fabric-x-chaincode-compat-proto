@@ -306,8 +306,9 @@ cd ..
 The integration tests build `sample_external_chaincode/cmd/e2e-server`, start
 temporary chaincode/orchestrator processes on high local ports, and cover
 duplicate request handling, remote org unavailable, mismatched org result,
-timeout before submit, and retry after completed result. Test logs are written
-under `runtime/compatibility_service/e2e`.
+timeout before submit, retry after completed result, and same `tx_id` with
+changed request conflict. Test logs are written under
+`runtime/compatibility_service/e2e`.
 
 Avoid `go test ./...` from the repository root after the network has started,
 because Docker-owned files under `storage/` can interfere with recursive

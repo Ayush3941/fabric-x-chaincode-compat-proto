@@ -95,6 +95,26 @@ func TestRequestDigestIncludesClientTxID(t *testing.T) {
 	}
 }
 
+func TestIdempotencyIdentityUsesClientTxIDAsKey(t *testing.T) {
+	req1 := InvocationRequest{
+		ClientTxID:    "client-tx-1",
+		ClientCreator: []byte("creator"),
+		Function:      "compatv2",
+		Args:          []string{"asset1", "value1", "delete1"},
+	}
+	req2 := req1
+	req2.Args = []string{"asset1", "different-value", "delete1"}
+
+	key1, digest1 := idempotencyIdentity("channelqc4", "0", req1, true)
+	key2, digest2 := idempotencyIdentity("channelqc4", "0", req2, true)
+	if key1 != req1.ClientTxID || key2 != req1.ClientTxID {
+		t.Fatalf("expected idempotency key to use client tx id, got %q and %q", key1, key2)
+	}
+	if digest1 == digest2 {
+		t.Fatal("same tx id with different args should produce different request digests")
+	}
+}
+
 func TestRequestDigestIncludesTransient(t *testing.T) {
 	req1 := InvocationRequest{
 		ClientCreator: []byte("creator"),

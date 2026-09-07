@@ -805,6 +805,9 @@ func compatibilityDecorations(namespace string) map[string][]byte {
 
 func idempotencyIdentity(channel, namespace string, req InvocationRequest, submit bool) (string, string) {
 	digest := requestDigest(channel, namespace, req, submit)
+	if req.ClientTxID != "" {
+		return req.ClientTxID, digest
+	}
 	return digest, digest
 }
 
