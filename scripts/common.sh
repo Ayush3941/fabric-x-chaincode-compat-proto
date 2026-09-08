@@ -56,6 +56,20 @@ wait_for_mtls() {
   return 1
 }
 
+wait_for_container_log() {
+  local container="$1" pattern="$2" name="$3" timeout="${4:-120}"
+  echo "Waiting for ${name} readiness log..."
+  local i
+  for ((i = 1; i <= timeout; i++)); do
+    if docker logs "${container}" 2>&1 | grep -q "${pattern}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: timed out waiting for ${name} readiness log" >&2
+  return 1
+}
+
 compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
 }

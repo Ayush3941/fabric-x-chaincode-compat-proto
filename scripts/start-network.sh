@@ -37,4 +37,10 @@ wait_for_mtls \
   "${MTLS_KEY}" \
   "${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem"
 
+wait_for_container_log \
+  "project-committer" \
+  "Starting coordinator sender and receiver" \
+  "Committer delivery path" \
+  180
+
 echo "Network is up"

@@ -343,8 +343,7 @@ func (s *Service) Close() error {
 	return errors.Join(errs...)
 }
 
-// ProcessProposal accepts an MSP-signed Fabric proposal from the client. The
-// operation is carried as gRPC metadata so the proposal payload stays Fabric-like.
+// ProcessProposal accepts an MSP-signed Fabric proposal from the client.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
 	inv, err := endorsement.Parse(prop, time.Now())
 	if err != nil {
@@ -447,12 +446,12 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	var record *idempotencyRecord
 	if submit {
 		req.IdempotencyKey, req.RequestDigest = idempotencyIdentity(s.cfg.ChannelID, namespace, req, submit)
-		var owner bool
-		record, owner, err = s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
+		var firstRequest bool
+		record, firstRequest, err = s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
 		if err != nil {
 			return InvocationResponse{}, err
 		}
-		if !owner {
+		if !firstRequest {
 			s.logger.Infof("idempotency_key=%s duplicate request detected; waiting for stored result", req.IdempotencyKey)
 			out, err := s.idempotency.wait(ctx, record)
 			out.IdempotentReplay = true
@@ -486,7 +485,6 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return out, nil
 	}
 	if !submit {
-		out.ChaincodeEvent = eventFromEndorsement(localResult.Endorsement, localResult.TxID)
 		s.logger.Infof("tx=%s query completed status=%d", localResult.TxID, resp.Status)
 		return out, nil
 	}

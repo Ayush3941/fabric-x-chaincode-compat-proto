@@ -59,6 +59,7 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 	req InvocationRequest,
 	local helperExecutionResult,
 ) ([]helperExecutionResult, error) {
+	// local is kept for later chaincode version/hash checks during lifecycle work.
 	_ = local
 	localMSPID := ""
 	if s != nil && s.cfg.Identity != nil {

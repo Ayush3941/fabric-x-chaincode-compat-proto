@@ -17,7 +17,7 @@ client CLI -> org0 orchestrator -> org0 CCAAS
                          -> merge matching endorsements -> orderer -> committer -> notification finality
 ```
 
-The ledger is real. Committed blocks are stored under `runtime/committer/ledger`
+Committed blocks are stored under `runtime/committer/ledger`
 and can be inspected with `bin/block-dump`.
 
 ## What Works
@@ -181,6 +181,7 @@ Useful ports:
 Run from `compatibility_service` in Terminal 5:
 
 ```bash
+mkdir -p ../runtime/compatibility_service
 FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
 ```
 
@@ -316,10 +317,9 @@ package discovery.
 
 ## Stop
 
-Run from the client terminal after the demo:
+Run from the repository root after the demo:
 
 ```bash
-cd ..
 ./scripts/stop-network.sh
 pkill -f 'sample-chaincode'
 pkill -f '/bin/orchestrator'

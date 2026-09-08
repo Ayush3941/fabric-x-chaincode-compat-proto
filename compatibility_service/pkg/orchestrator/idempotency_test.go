@@ -11,22 +11,22 @@ import (
 func TestIdempotencyStoreReplaysCompletedResult(t *testing.T) {
 	store := newIdempotencyStore()
 
-	record, owner, err := store.begin("key1", "digest1")
+	record, isFirstRequest, err := store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin first: %v", err)
 	}
-	if !owner {
+	if !isFirstRequest {
 		t.Fatal("first caller should own execution")
 	}
 
 	expected := InvocationResponse{TxID: "tx1", Status: 200, CommitStatus: "COMMITTED"}
 	store.complete(record, expected, nil)
 
-	record, owner, err = store.begin("key1", "digest1")
+	record, isFirstRequest, err = store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin duplicate: %v", err)
 	}
-	if owner {
+	if isFirstRequest {
 		t.Fatal("duplicate caller should not own execution")
 	}
 
@@ -58,11 +58,11 @@ func TestIdempotencyStoreReplaysFailure(t *testing.T) {
 	expectedErr := errors.New("boom")
 	store.complete(record, InvocationResponse{TxID: "tx1"}, expectedErr)
 
-	record, owner, err := store.begin("key1", "digest1")
+	record, isFirstRequest, err := store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin duplicate: %v", err)
 	}
-	if owner {
+	if isFirstRequest {
 		t.Fatal("duplicate caller should not own failed execution")
 	}
 	_, err = store.wait(context.Background(), record)

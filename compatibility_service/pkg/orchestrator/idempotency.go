@@ -46,6 +46,8 @@ func newIdempotencyStore() *idempotencyStore {
 	}
 }
 
+// begin returns firstRequest=true only for the caller that created the record
+// and should execute the transaction. Duplicate callers wait on the record.
 func (s *idempotencyStore) begin(key, digest string) (*idempotencyRecord, bool, error) {
 	if key == "" || digest == "" {
 		return nil, false, errors.New("idempotency key and digest are required")
