@@ -17,6 +17,7 @@ import (
 
 	"compatibility_service/pkg/config"
 	"compatibility_service/pkg/helper"
+	"compatibility_service/pkg/lifecycle"
 	"compatibility_service/pkg/shim"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-committer/utils/serve"
@@ -142,6 +143,7 @@ type Service struct {
 	notifier     *network.Peer
 	notify       committerpb.NotifierClient
 	idempotency  *idempotencyStore
+	lifecycle    *lifecycle.Store
 	logger       sdk.Logger
 }
 
@@ -235,6 +237,17 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
+	lifecycleStore, err := lifecycle.NewMemoryStore()
+	if err != nil {
+		if notifier != nil {
+			notifier.Close() //nolint:errcheck
+		}
+		submitter.Close() //nolint:errcheck
+		helper.Close()    //nolint:errcheck
+		queryPeer.Close() //nolint:errcheck
+		return nil, fmt.Errorf("create lifecycle store: %w", err)
+	}
+
 	orchestratorLogger.Infof("orchestrator initialized channel=%s default_namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
 		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
 	return &Service{
@@ -248,6 +261,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notifier:     notifier,
 		notify:       notify,
 		idempotency:  newIdempotencyStore(),
+		lifecycle:    lifecycleStore,
 		logger:       orchestratorLogger,
 	}, nil
 }
@@ -320,9 +334,10 @@ func (s *Service) Run(ctx context.Context) error {
 // RegisterService implements serve.Registerer.
 func (s *Service) RegisterService(servers serve.Servers) {
 	peer.RegisterEndorserServer(servers.GRPC, s)
+	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServer(s.lifecycle, s.cfg.Identity.MspID, s.logger))
 	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
 	reflection.Register(servers.GRPC)
-	s.logger.Infof("orchestrator gRPC ProcessProposal registered")
+	s.logger.Infof("orchestrator gRPC ProcessProposal and lifecycle services registered")
 }
 
 // Close closes outbound connections held by the orchestrator.
@@ -339,6 +354,9 @@ func (s *Service) Close() error {
 	}
 	if s.notifier != nil {
 		errs = append(errs, s.notifier.Close())
+	}
+	if s.lifecycle != nil {
+		errs = append(errs, s.lifecycle.Close())
 	}
 	return errors.Join(errs...)
 }

@@ -12,6 +12,7 @@ artifacts/
 # Local binaries/tools built or copied for the demo
 bin/
 *.test
+sample_external_chaincode/cc_package/
 
 # Local dependency checkouts/builds
 third_party/

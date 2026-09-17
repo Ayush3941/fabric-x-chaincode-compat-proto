@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
+identity:
+  msp-id: org-0
+  msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/msp
+
+orchestrator:
+  endpoint:
+    host: 127.0.0.1
+    port: 9102
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/tls/client.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/tls/client.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
+    server-name: 127.0.0.1

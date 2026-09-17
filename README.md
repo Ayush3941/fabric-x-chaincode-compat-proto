@@ -119,6 +119,39 @@ cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
+## Package CCAAS Metadata
+
+Run from `compatibility_service`:
+
+```bash
+mkdir -p ../sample_external_chaincode/cc_package/org0_sample
+./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org0_sample --label org0_sample_1 --output ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
+```
+
+For the org1 sample chaincode endpoint:
+
+```bash
+mkdir -p ../sample_external_chaincode/cc_package/org1_sample
+./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org1_sample --label org1_sample_1 --output ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
+```
+
+For the integration-test chaincode:
+
+```bash
+mkdir -p ../sample_external_chaincode/cc_package/e2e
+./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/e2e --label e2e_1 --output ../sample_external_chaincode/cc_package/e2e/e2e.tgz
+```
+
+The command writes/updates `metadata.json` in the selected `cc_go/<name>`
+directory and produces a Fabric lifecycle package:
+
+```text
+<name>.tgz
+├── metadata.json
+└── code.tar.gz
+    └── connection.json
+```
+
 ## Start Services
 
 Use four service terminals and one client terminal.
@@ -179,6 +212,35 @@ Useful ports:
 7001   Query Service
 6022   Arma orderer router
 ```
+
+## Install CCAAS Packages
+
+Run from `compatibility_service` in Terminal 5 after both orchestrators are
+running:
+
+```bash
+FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle install -c sampleconfig/lifecycle-org0.yaml ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
+FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle queryinstalled -c sampleconfig/lifecycle-org0.yaml
+FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle install -c sampleconfig/lifecycle-org1.yaml ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
+FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle queryinstalled -c sampleconfig/lifecycle-org1.yaml
+```
+
+Expected org0 query output includes:
+
+```text
+package_id=org0_sample_1:...
+label=org0_sample_1
+```
+
+Expected org1 query output includes:
+
+```text
+package_id=org1_sample_1:...
+label=org1_sample_1
+```
+
+The install store is in-memory SQLite inside each running orchestrator process.
+Restarting an orchestrator clears its installed-package list.
 
 ## Run Compatv2
 

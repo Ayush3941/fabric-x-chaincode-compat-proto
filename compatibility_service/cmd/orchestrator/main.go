@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	lifecyclecli "compatibility_service/pkg/lifecycle/cli"
 	"compatibility_service/pkg/orchestrator"
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
@@ -33,6 +34,7 @@ func main() {
 	cmd.Flags().StringP("config", "c", "", "Path to configuration file")
 	cmd.Flags().String("log-level", "INFO", "Log level (DEBUG, INFO, WARNING, ERROR)")
 	cmd.MarkFlagRequired("config")
+	cmd.AddCommand(lifecyclecli.NewCommand())
 
 	if err := cmd.ExecuteContext(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
