@@ -17,29 +17,54 @@ sed "s|ARTIFACTS_DIR|${ARTIFACTS_DIR}|g" \
 sed "s|ARTIFACTS_DIR|${ARTIFACTS_DIR}|g" \
   "${PROJECT_ROOT}/fxconfig/peer-org-1.yaml" >"${FXCONFIG_ORG1}"
 
+run_fxconfig() {
+  FABRIC_LOGGING_SPEC="${FABRIC_LOGGING_SPEC:-error}" "${FABRIC_X_BIN}/fxconfig" "$@"
+}
+
+namespace_exists() {
+  local namespace="$1"
+  local output status
+
+  set +e
+  output="$(run_fxconfig namespace list --config="${FXCONFIG_ORG0}" 2>&1)"
+  status=$?
+  set -e
+
+  if [ "${status}" -ne 0 ]; then
+    return 1
+  fi
+
+  grep -Eq "^[[:space:]]*[0-9]+\\) ${namespace}: " <<<"${output}"
+}
+
 create_namespace() {
   local namespace="$1"
   local policy="$2"
   local tx_dir="${ARTIFACTS_DIR}/fxconfig-tx/namespace-${namespace}"
 
+  if namespace_exists "${namespace}"; then
+    echo "Namespace ${namespace} already exists; skipping"
+    return
+  fi
+
   rm -rf "${tx_dir}"
   mkdir -p "${tx_dir}"
 
   echo "Creating namespace ${namespace} with policy ${policy}"
-  "${FABRIC_X_BIN}/fxconfig" namespace create "${namespace}" \
+  run_fxconfig namespace create "${namespace}" \
     --config="${FXCONFIG_ORG0}" \
     --policy="${policy}" \
     --output="${tx_dir}/tx.json"
 
-  "${FABRIC_X_BIN}/fxconfig" tx endorse "${tx_dir}/tx.json" \
+  run_fxconfig tx endorse "${tx_dir}/tx.json" \
     --config="${FXCONFIG_ORG0}" \
     --output="${tx_dir}/tx_org0.json" </dev/null
 
-  "${FABRIC_X_BIN}/fxconfig" tx endorse "${tx_dir}/tx.json" \
+  run_fxconfig tx endorse "${tx_dir}/tx.json" \
     --config="${FXCONFIG_ORG1}" \
     --output="${tx_dir}/tx_org1.json" </dev/null
 
-  "${FABRIC_X_BIN}/fxconfig" tx merge \
+  run_fxconfig tx merge \
     "${tx_dir}/tx_org0.json" \
     "${tx_dir}/tx_org1.json" \
     --output="${tx_dir}/tx_merged.json" </dev/null
@@ -47,7 +72,7 @@ create_namespace() {
   local submit_tx="${tx_dir}/tx_merged.json"
 
   set +e
-  SUBMIT_OUTPUT="$("${FABRIC_X_BIN}/fxconfig" tx submit --wait \
+  SUBMIT_OUTPUT="$(run_fxconfig tx submit --wait \
     "${submit_tx}" \
     --config="${FXCONFIG_ORG0}" </dev/null 2>&1)"
   SUBMIT_STATUS=$?

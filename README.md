@@ -98,6 +98,10 @@ Run from the repository root:
 The last command creates namespace `0` with `OR('org-0.member')` and namespace
 `1` with `AND('org-0.member','org-1.member')`.
 
+If those namespaces already exist, `create-namespace.sh` skips them. For a
+fully clean ledger and namespace state, run `./scripts/clean.sh` before this
+setup sequence.
+
 The namespace setup transactions are signed by both app orgs. That is separate
 from the policy stored inside each namespace.
 
