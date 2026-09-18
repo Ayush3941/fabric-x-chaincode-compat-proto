@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 channel-id: channelqc4
-namespace: "1"
 protocol: fabric-x
 
 identity:

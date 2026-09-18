@@ -493,7 +493,11 @@ func (h *e2eHarness) invokeSigned(ctx context.Context, prop *peer.SignedProposal
 	}
 	defer peerClient.Close() //nolint:errcheck
 
-	ctx = metadata.AppendToOutgoingContext(ctx, orchestrator.GRPCOperationMetadata, orchestrator.GRPCOperationInvoke)
+	ctx = metadata.AppendToOutgoingContext(
+		ctx,
+		orchestrator.GRPCOperationMetadata, orchestrator.GRPCOperationInvoke,
+		orchestrator.GRPCNamespaceMetadata, namespace,
+	)
 	resp, err := peerClient.ProcessProposal(ctx, prop)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, err
@@ -540,7 +544,7 @@ func (h *e2eHarness) newSignedProposalWithNonce(t *testing.T, nonce []byte, func
 			ChaincodeSpec: &peer.ChaincodeSpec{
 				Type: peer.ChaincodeSpec_CAR,
 				ChaincodeId: &peer.ChaincodeID{
-					Name:    namespace,
+					Name:    "sample",
 					Version: "1.0",
 				},
 				Input: &peer.ChaincodeInput{Args: inputArgs},

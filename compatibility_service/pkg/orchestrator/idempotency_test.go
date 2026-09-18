@@ -135,3 +135,22 @@ func TestRequestDigestIncludesTransient(t *testing.T) {
 		t.Fatal("different transient values should produce different digest")
 	}
 }
+
+func TestRequestDigestIncludesIsInit(t *testing.T) {
+	req1 := InvocationRequest{
+		ClientTxID:       "client-tx-1",
+		ClientCreator:    []byte("creator"),
+		ChaincodeName:    "sample",
+		ChaincodeVersion: "1.0",
+		Function:         "compatv2",
+		Args:             []string{"asset1", "value1", "delete1"},
+	}
+	req2 := req1
+	req2.IsInit = true
+
+	digest1 := requestDigest("channelqc4", "0", req1, true)
+	digest2 := requestDigest("channelqc4", "0", req2, true)
+	if digest1 == digest2 {
+		t.Fatal("is-init flag should produce a different request digest")
+	}
+}

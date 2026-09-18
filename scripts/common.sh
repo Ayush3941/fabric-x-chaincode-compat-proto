@@ -61,7 +61,7 @@ wait_for_container_log() {
   echo "Waiting for ${name} readiness log..."
   local i
   for ((i = 1; i <= timeout; i++)); do
-    if docker logs "${container}" 2>&1 | grep -q "${pattern}"; then
+    if docker logs "${container}" 2>&1 | grep -F "${pattern}" >/dev/null; then
       return 0
     fi
     sleep 1

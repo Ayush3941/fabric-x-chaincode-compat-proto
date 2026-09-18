@@ -19,6 +19,7 @@ import (
 	"compatibility_service/pkg/helper"
 	"compatibility_service/pkg/lifecycle"
 	"compatibility_service/pkg/shim"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-committer/utils/serve"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
@@ -42,6 +43,8 @@ import (
 
 const (
 	GRPCOperationMetadata = "x-compat-operation"
+	GRPCNamespaceMetadata = "x-compat-namespace"
+	GRPCInitMetadata      = "x-compat-is-init"
 	GRPCOperationInvoke   = "invoke"
 	GRPCOperationQuery    = "query"
 	GRPCOperationEndorse  = "endorse"
@@ -49,19 +52,20 @@ const (
 
 // Config contains the orchestrator wiring.
 type Config struct {
-	ChannelID       string                        `mapstructure:"channel-id"`
-	Namespace       string                        `mapstructure:"namespace"`
-	Protocol        string                        `mapstructure:"protocol"`
-	Server          *serve.ServerConfig           `mapstructure:"server"`
-	Identity        *config.IdentityConfig        `mapstructure:"identity"`
-	QueryService    config.ClientConfig           `mapstructure:"query-service"`
-	ChaincodeSvc    config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
-	Orderer         *config.ClientConfig          `mapstructure:"orderer"`
-	NotificationSvc *config.ClientConfig          `mapstructure:"notification-service"`
-	RemoteOrgs      []RemoteOrchestratorConfig    `mapstructure:"remote-orchestrators"`
-	WaitAfterSubmit time.Duration                 `mapstructure:"wait-after-submit"`
-	RequestTimeout  time.Duration                 `mapstructure:"request-timeout"`
-	FinalityTimeout time.Duration                 `mapstructure:"finality-timeout"`
+	ChannelID          string                        `mapstructure:"channel-id"`
+	Namespace          string                        `mapstructure:"namespace"`
+	LifecycleNamespace string                        `mapstructure:"lifecycle-namespace"`
+	Protocol           string                        `mapstructure:"protocol"`
+	Server             *serve.ServerConfig           `mapstructure:"server"`
+	Identity           *config.IdentityConfig        `mapstructure:"identity"`
+	QueryService       config.ClientConfig           `mapstructure:"query-service"`
+	ChaincodeSvc       config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
+	Orderer            *config.ClientConfig          `mapstructure:"orderer"`
+	NotificationSvc    *config.ClientConfig          `mapstructure:"notification-service"`
+	RemoteOrgs         []RemoteOrchestratorConfig    `mapstructure:"remote-orchestrators"`
+	WaitAfterSubmit    time.Duration                 `mapstructure:"wait-after-submit"`
+	RequestTimeout     time.Duration                 `mapstructure:"request-timeout"`
+	FinalityTimeout    time.Duration                 `mapstructure:"finality-timeout"`
 }
 
 // RemoteOrchestratorConfig is a static V2 routing entry for one organization.
@@ -102,6 +106,9 @@ type InvocationRequest struct {
 	IdempotencyKey       string               `json:"-"`
 	RequestDigest        string               `json:"-"`
 	Namespace            string               `json:"namespace,omitempty"`
+	ChaincodeName        string               `json:"chaincode_name,omitempty"`
+	ChaincodeVersion     string               `json:"chaincode_version,omitempty"`
+	IsInit               bool                 `json:"is_init,omitempty"`
 	Function             string               `json:"function,omitempty"`
 	Args                 []string             `json:"args,omitempty"`
 }
@@ -144,6 +151,7 @@ type Service struct {
 	notify       committerpb.NotifierClient
 	idempotency  *idempotencyStore
 	lifecycle    *lifecycle.Store
+	remotes      map[string]*OrchestratorContact
 	logger       sdk.Logger
 }
 
@@ -192,17 +200,24 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	}
 	shimConnector.SetLogger(shimLogger)
 
+	lifecycleStore, err := lifecycle.NewMemoryStore()
+	if err != nil {
+		queryPeer.Close() //nolint:errcheck
+		return nil, fmt.Errorf("create lifecycle store: %w", err)
+	}
+
 	helperCfg := helper.ServiceConfig{
 		ChannelID:    cfg.ChannelID,
 		Protocol:     cfg.Protocol,
 		QueryService: cfg.QueryService.ToPeerConf(),
 	}
 	executors := map[string]helper.Executor{
-		"*": helper.NewChaincodeServiceExecutor(shimConnector),
+		"*": newLifecycleExecutor(lifecycleStore, cfg.Identity.MspID, shimConnector, shimLogger),
 	}
 	helper, err := helper.NewWithSigner(helperCfg, signer, executors, helperLogger)
 	if err != nil {
-		queryPeer.Close() //nolint:errcheck
+		lifecycleStore.Close() //nolint:errcheck
+		queryPeer.Close()      //nolint:errcheck
 		return nil, fmt.Errorf("create internal helper: %w", err)
 	}
 
@@ -214,13 +229,15 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	case "fabric-x", "":
 		submitter, err = nfabx.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
 	default:
-		helper.Close()    //nolint:errcheck
-		queryPeer.Close() //nolint:errcheck
+		helper.Close()         //nolint:errcheck
+		lifecycleStore.Close() //nolint:errcheck
+		queryPeer.Close()      //nolint:errcheck
 		return nil, fmt.Errorf("unknown protocol %q: must be \"fabric\" or \"fabric-x\"", cfg.Protocol)
 	}
 	if err != nil {
-		helper.Close()    //nolint:errcheck
-		queryPeer.Close() //nolint:errcheck
+		helper.Close()         //nolint:errcheck
+		lifecycleStore.Close() //nolint:errcheck
+		queryPeer.Close()      //nolint:errcheck
 		return nil, fmt.Errorf("create submitter: %w", err)
 	}
 
@@ -229,23 +246,25 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	if cfg.NotificationSvc != nil {
 		notifier, err = network.NewPeer(cfg.NotificationSvc.ToPeerConf())
 		if err != nil {
-			submitter.Close() //nolint:errcheck
-			helper.Close()    //nolint:errcheck
-			queryPeer.Close() //nolint:errcheck
+			submitter.Close()      //nolint:errcheck
+			helper.Close()         //nolint:errcheck
+			lifecycleStore.Close() //nolint:errcheck
+			queryPeer.Close()      //nolint:errcheck
 			return nil, fmt.Errorf("notification service: %w", err)
 		}
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	lifecycleStore, err := lifecycle.NewMemoryStore()
+	remoteContacts, err := newOrchestratorContacts(cfg.RemoteOrgs, orchestratorLogger)
 	if err != nil {
+		lifecycleStore.Close() //nolint:errcheck
 		if notifier != nil {
 			notifier.Close() //nolint:errcheck
 		}
 		submitter.Close() //nolint:errcheck
 		helper.Close()    //nolint:errcheck
 		queryPeer.Close() //nolint:errcheck
-		return nil, fmt.Errorf("create lifecycle store: %w", err)
+		return nil, fmt.Errorf("create remote orchestrator contacts: %w", err)
 	}
 
 	orchestratorLogger.Infof("orchestrator initialized channel=%s default_namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
@@ -262,6 +281,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify:       notify,
 		idempotency:  newIdempotencyStore(),
 		lifecycle:    lifecycleStore,
+		remotes:      remoteContacts,
 		logger:       orchestratorLogger,
 	}, nil
 }
@@ -334,7 +354,7 @@ func (s *Service) Run(ctx context.Context) error {
 // RegisterService implements serve.Registerer.
 func (s *Service) RegisterService(servers serve.Servers) {
 	peer.RegisterEndorserServer(servers.GRPC, s)
-	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServer(s.lifecycle, s.cfg.Identity.MspID, s.logger))
+	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServer(s.lifecycle, s.cfg.Identity.MspID, s.logger, s, lifecycleRemotes(s.remotes)...))
 	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
 	reflection.Register(servers.GRPC)
 	s.logger.Infof("orchestrator gRPC ProcessProposal and lifecycle services registered")
@@ -357,6 +377,9 @@ func (s *Service) Close() error {
 	}
 	if s.lifecycle != nil {
 		errs = append(errs, s.lifecycle.Close())
+	}
+	if s.remotes != nil {
+		errs = append(errs, closeOrchestratorContacts(s.remotes))
 	}
 	return errors.Join(errs...)
 }
@@ -381,12 +404,16 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	if namespace, ok := namespaceFromContext(ctx); ok {
+		req.Namespace = namespace
+	}
+	req.IsInit = initFromContext(ctx)
 	req.ClientTxID = inv.TxID
 	req.ClientCreator = append([]byte(nil), inv.Creator...)
 	req.ClientNonce = append([]byte(nil), inv.Nonce...)
 	req.ClientSignedProposal = cloneSignedProposal(prop)
-	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s fn=%s args=%d",
-		inv.TxID, operation, inv.Channel, req.Namespace, req.Function, len(req.Args))
+	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s chaincode=%s:%s is_init=%t fn=%s args=%d",
+		inv.TxID, operation, inv.Channel, req.Namespace, req.ChaincodeName, req.ChaincodeVersion, req.IsInit, req.Function, len(req.Args))
 
 	requestTimeout := s.cfg.requestTimeout()
 	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
@@ -441,6 +468,9 @@ func (s *Service) EndorseOnly(ctx context.Context, req InvocationRequest) (*peer
 	if err != nil {
 		return nil, err
 	}
+	if _, err := s.validateInitState(ctx, req, namespace, GRPCOperationEndorse); err != nil {
+		return nil, err
+	}
 	result, err := s.executeFresh(ctx, req, namespace, args)
 	if err != nil {
 		return nil, fmt.Errorf("helper endorsement failed: %w", err)
@@ -478,6 +508,10 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		defer func() {
 			s.idempotency.complete(record, out, err)
 		}()
+	}
+	initDefinition, err := s.validateInitState(ctx, req, namespace, operationName(submit))
+	if err != nil {
+		return InvocationResponse{}, err
 	}
 
 	policy, err := s.resolveNamespacePolicy(ctx, namespace)
@@ -520,6 +554,14 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	}
 
 	out, err = s.submitAndWaitFinality(ctx, merged, out, localResult.TxID, record)
+	if err != nil {
+		return out, err
+	}
+	if req.IsInit && out.CommitStatus == committerpb.Status_COMMITTED.String() && initDefinition != nil {
+		if err := s.markInitializedAfterCommit(ctx, *initDefinition); err != nil {
+			return out, err
+		}
+	}
 	return out, err
 }
 
@@ -539,18 +581,13 @@ func (s *Service) prepareInvocation(req InvocationRequest) (string, [][]byte, er
 	return namespace, args, nil
 }
 
-func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, clientProposal helper.ClientProposalContext) (sdk.Endorsement, error) {
+func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string, args [][]byte, transient map[string][]byte, clientProposal helper.ClientProposalContext) (sdk.Endorsement, error) {
 	if s.helper == nil {
 		return sdk.Endorsement{}, errors.New("internal helper is not configured")
 	}
-	prop := clientProposal.SignedProposal
-	// temporary fallback for tests and stuff
-	if prop == nil {
-		var err error
-		prop, err = network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
-		if err != nil {
-			return sdk.Endorsement{}, fmt.Errorf("create helper proposal: %w", err)
-		}
+	prop, err := s.helperProposal(namespace, nsVersion, args, transient, clientProposal)
+	if err != nil {
+		return sdk.Endorsement{}, err
 	}
 	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
 	if err != nil {
@@ -563,7 +600,11 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 	s.logger.Infof("tx=%s helper proposal created namespace=%s version=%s fn=%s args=%d",
 		txID, namespace, nsVersion, argString(args, 0), len(args)-1)
 
-	resp, err := s.helper.ProcessProposal(helper.WithClientProposal(ctx, clientProposal), prop)
+	proposalContext := clientProposal
+	if proposalContext.SignedProposal == nil {
+		proposalContext.SignedProposal = prop
+	}
+	resp, err := s.helper.ProcessProposal(helper.WithClientProposal(ctx, proposalContext), prop)
 	if err != nil {
 		return sdk.Endorsement{}, fmt.Errorf("helper process proposal: %w", err)
 	}
@@ -572,6 +613,47 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 			txID, resp.Response.Status, len(resp.Response.Payload), len(resp.Payload), resp.Endorsement != nil)
 	}
 	return sdk.Endorsement{Proposal: proposal, Responses: []*peer.ProposalResponse{resp}}, nil
+}
+
+func (s *Service) helperProposal(namespace, nsVersion string, args [][]byte, transient map[string][]byte, clientProposal helper.ClientProposalContext) (*peer.SignedProposal, error) {
+	if len(clientProposal.Creator) == 0 || len(clientProposal.Nonce) == 0 {
+		prop, err := network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
+		if err != nil {
+			return nil, fmt.Errorf("create helper proposal: %w", err)
+		}
+		return prop, nil
+	}
+
+	txID := protoutil.ComputeTxID(clientProposal.Nonce, clientProposal.Creator)
+	proposal, _, err := protoutil.CreateChaincodeProposalWithTxIDNonceAndTransient(
+		txID,
+		common.HeaderType_ENDORSER_TRANSACTION,
+		s.cfg.ChannelID,
+		&peer.ChaincodeInvocationSpec{
+			ChaincodeSpec: &peer.ChaincodeSpec{
+				Type: peer.ChaincodeSpec_CAR,
+				ChaincodeId: &peer.ChaincodeID{
+					Name:    namespace,
+					Version: nsVersion,
+				},
+				Input: &peer.ChaincodeInput{
+					Args:        args,
+					Decorations: cloneByteMap(clientProposal.Decorations),
+				},
+			},
+		},
+		clientProposal.Nonce,
+		clientProposal.Creator,
+		transient,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create helper proposal: %w", err)
+	}
+	proposalBytes, err := proto.Marshal(proposal)
+	if err != nil {
+		return nil, fmt.Errorf("marshal helper proposal: %w", err)
+	}
+	return &peer.SignedProposal{ProposalBytes: proposalBytes}, nil
 }
 
 type finalitySubscription struct {
@@ -713,6 +795,24 @@ func operationFromContext(ctx context.Context) (string, error) {
 	}
 }
 
+func namespaceFromContext(ctx context.Context) (string, bool) {
+	values := metadata.ValueFromIncomingContext(ctx, GRPCNamespaceMetadata)
+	if len(values) == 0 || values[0] == "" {
+		return "", false
+	}
+	return values[0], true
+}
+
+func initFromContext(ctx context.Context) bool {
+	values := metadata.ValueFromIncomingContext(ctx, GRPCInitMetadata)
+	for _, value := range values {
+		if value == "true" {
+			return true
+		}
+	}
+	return false
+}
+
 func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) {
 	if len(inv.Args) < 1 {
 		return InvocationRequest{}, errors.New("orchestrator proposal requires function")
@@ -722,7 +822,8 @@ func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) 
 		Function: string(inv.Args[0]),
 	}
 	if inv.CCID != nil {
-		req.Namespace = inv.CCID.Name
+		req.ChaincodeName = inv.CCID.Name
+		req.ChaincodeVersion = inv.CCID.Version
 	}
 	if inv.Proposal != nil {
 		cpp, err := protoutil.UnmarshalChaincodeProposalPayload(inv.Proposal.Payload)
@@ -812,10 +913,12 @@ func operationName(submit bool) string {
 	return "query"
 }
 
-func compatibilityDecorations(namespace string) map[string][]byte {
+func compatibilityDecorations(namespace, chaincodeName, chaincodeVersion string) map[string][]byte {
 	return map[string][]byte{
-		"compat.decorator": []byte("orchestrator"),
-		"compat.namespace": []byte(namespace),
+		"compat.decorator":         []byte("orchestrator"),
+		"compat.namespace":         []byte(namespace),
+		"compat.chaincode_name":    []byte(chaincodeName),
+		"compat.chaincode_version": []byte(chaincodeVersion),
 	}
 }
 
@@ -834,6 +937,9 @@ func requestDigest(channel, namespace string, req InvocationRequest, submit bool
 	writeDigestString(h, req.ClientTxID)
 	writeDigestString(h, channel)
 	writeDigestString(h, namespace)
+	writeDigestString(h, req.ChaincodeName)
+	writeDigestString(h, req.ChaincodeVersion)
+	writeDigestString(h, fmt.Sprintf("%t", req.IsInit))
 	writeDigestString(h, req.Function)
 	writeDigestBytes(h, req.ClientCreator)
 	for _, arg := range req.Args {

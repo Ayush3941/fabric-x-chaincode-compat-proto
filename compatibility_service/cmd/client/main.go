@@ -32,9 +32,6 @@ type Config struct {
 	// ChannelID is the channel to submit to.
 	ChannelID string `mapstructure:"channel-id"`
 
-	// Namespace is the chaincode name or Fabric-X namespace to invoke.
-	Namespace string `mapstructure:"namespace"`
-
 	// Protocol selects the network protocol: "fabric" or "fabric-x".
 	// Defaults to "fabric-x".
 	Protocol string `mapstructure:"protocol"`
@@ -67,8 +64,12 @@ func main() {
   invoke — runs the write path and prints the orchestrator result`,
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
-	cmd.PersistentFlags().String("namespace", "", "Namespace to invoke (overrides config)")
+	cmd.PersistentFlags().String("namespace", "", "Fabric-X namespace to invoke")
+	cmd.PersistentFlags().StringP("name", "n", "", "Lifecycle chaincode name")
+	cmd.PersistentFlags().StringP("version", "v", "1.0", "Lifecycle chaincode version")
 	cmd.MarkPersistentFlagRequired("config")
+	cmd.MarkPersistentFlagRequired("namespace")
+	cmd.MarkPersistentFlagRequired("name")
 
 	cmd.AddCommand(newQueryCmd(), newInvokeCmd())
 
@@ -88,8 +89,15 @@ func newQueryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			res, err := callOrchestrator(cmd.Context(), cfg, ns, "query", txArgs, transient)
+			ns, err := namespaceFromFlag(cmd)
+			if err != nil {
+				return err
+			}
+			ccName, ccVersion, err := chaincodeIdentity(cmd)
+			if err != nil {
+				return err
+			}
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, ccName, ccVersion, "query", txArgs, transient, false)
 			if err != nil {
 				return err
 			}
@@ -106,6 +114,7 @@ func newQueryCmd() *cobra.Command {
 }
 
 func newInvokeCmd() *cobra.Command {
+	var isInit bool
 	cmd := &cobra.Command{
 		Use:   `invoke '{"function":"...","Args":[]}'`,
 		Short: "Invoke through the orchestrator and wait for finality",
@@ -118,8 +127,15 @@ Service finality, and returns the final status.`,
 			if err != nil {
 				return err
 			}
-			ns := namespaceOrDefault(cmd, cfg.Namespace)
-			res, err := callOrchestrator(cmd.Context(), cfg, ns, "invoke", txArgs, transient)
+			ns, err := namespaceFromFlag(cmd)
+			if err != nil {
+				return err
+			}
+			ccName, ccVersion, err := chaincodeIdentity(cmd)
+			if err != nil {
+				return err
+			}
+			res, err := callOrchestrator(cmd.Context(), cfg, ns, ccName, ccVersion, "invoke", txArgs, transient, isInit)
 			if err != nil {
 				return err
 			}
@@ -131,6 +147,7 @@ Service finality, and returns the final status.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&isInit, "is-init", false, "Mark this invoke as the lifecycle init transaction")
 	return cmd
 }
 
@@ -196,9 +213,6 @@ func validate(cfg Config) error {
 	if cfg.ChannelID == "" {
 		return fmt.Errorf("channel-id is required")
 	}
-	if cfg.Namespace == "" {
-		return fmt.Errorf("namespace is required")
-	}
 	if cfg.Orchestrator == nil || cfg.Orchestrator.Endpoint == nil {
 		return fmt.Errorf("orchestrator.endpoint is required")
 	}
@@ -208,7 +222,7 @@ func validate(cfg Config) error {
 	return nil
 }
 
-func callOrchestrator(ctx context.Context, cfg Config, namespace, operation string, txArgs [][]byte, transient map[string][]byte) (orchestrator.InvocationResponse, error) {
+func callOrchestrator(ctx context.Context, cfg Config, namespace, ccName, ccVersion, operation string, txArgs [][]byte, transient map[string][]byte, isInit bool) (orchestrator.InvocationResponse, error) {
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("load identity: %w", err)
@@ -218,7 +232,7 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, operation stri
 		return orchestrator.InvocationResponse{}, fmt.Errorf("unknown orchestrator operation %q", operation)
 	}
 
-	prop, err := newSignedProposal(signer, cfg.ChannelID, namespace, "1.0", txArgs, transient)
+	prop, err := newSignedProposal(signer, cfg.ChannelID, ccName, ccVersion, txArgs, transient)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("create signed proposal: %w", err)
 	}
@@ -229,7 +243,12 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, operation stri
 	}
 	defer orchestratorPeer.Close() //nolint:errcheck
 
-	ctx = metadata.AppendToOutgoingContext(ctx, orchestrator.GRPCOperationMetadata, operation)
+	ctx = metadata.AppendToOutgoingContext(
+		ctx,
+		orchestrator.GRPCOperationMetadata, operation,
+		orchestrator.GRPCNamespaceMetadata, namespace,
+		orchestrator.GRPCInitMetadata, fmt.Sprintf("%t", isInit),
+	)
 	resp, err := orchestratorPeer.ProcessProposal(ctx, prop)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator grpc call failed: %w", err)
@@ -300,9 +319,21 @@ func newNonce() ([]byte, error) {
 	return nonce, nil
 }
 
-func namespaceOrDefault(cmd *cobra.Command, cfgNamespace string) string {
+func namespaceFromFlag(cmd *cobra.Command) (string, error) {
 	if ns, _ := cmd.Flags().GetString("namespace"); ns != "" {
-		return ns
+		return ns, nil
 	}
-	return cfgNamespace
+	return "", fmt.Errorf("namespace is required")
+}
+
+func chaincodeIdentity(cmd *cobra.Command) (string, string, error) {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		return "", "", fmt.Errorf("name is required")
+	}
+	version, _ := cmd.Flags().GetString("version")
+	if version == "" {
+		version = "1.0"
+	}
+	return name, version, nil
 }

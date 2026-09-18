@@ -1,180 +1,33 @@
 # Fabric-X Chaincode Compatibility Service
 
-This folder contains the V1 chaincode compatibility orchestrator and test
-client. The orchestrator embeds the helper execution path in the same process.
-That internal helper is based on the Fabric-X custom endorser shape, but the
-executor talks to an external Fabric chaincode-as-a-service process through the
-real Fabric shim message protocol.
+This folder contains the compatibility service binaries:
 
-The helper is intentionally stateless:
+- `cmd/orchestrator`: serves the client-facing ProcessProposal API, lifecycle API, embedded helper path, remote endorsement calls, Fabric-X submit, and finality wait.
+- `cmd/client`: sends MSP-signed invoke/query proposals to the orchestrator.
+- `pkg/helper`: executes one chaincode proposal, owns the per-invocation execution context, reads committed state through Query Service, and builds Fabric-X endorsement material.
+- `pkg/shim`: speaks the Fabric chaincode-as-a-service shim protocol with the external chaincode process.
+- `pkg/lifecycle`: packages, installs, approves, commits, and resolves CCAAS connection metadata in the orchestrator's in-memory lifecycle store.
+- `pkg/orchestrator`: coordinates local helper execution, remote orchestrator execution, result matching, endorsement merge, orderer submit, and Notification Service finality.
 
-- it does not maintain a Fabric peer ledger
-- it does not run a local world-state database
-- it reads committed state through Fabric-X Query Service
-- it captures reads, writes, deletes, responses, and event payloads per
-  invocation
-- it returns Fabric-X-format endorsements through `fabric-x-sdk`
+Use the repository-root [README.md](../README.md) for the full runnable flow.
+That guide starts the Fabric-X network, runs both org chaincode services, runs
+both orchestrators, installs lifecycle packages, commits the sample definition,
+invokes `compatv2`, verifies committed state, and dumps the generated block.
 
-Current V1 flow:
+Current execution shape:
 
 ```text
 client CLI
--> orchestrator Fabric-X SDK ProcessProposal gRPC API
--> internal helper ProcessProposal path
--> pkg/helper ExecutionContext
--> pkg/shim CCAAS connector and message handler
--> external chaincode Invoke
--> GET_STATE routed to Fabric-X Query Service
--> PUT_STATE / DEL_STATE captured in memory
--> Fabric-X endorsement response
--> orchestrator submits to orderer and waits for Notification Service finality
+-> org0 orchestrator
+   -> local helper -> org0 CCAAS
+   -> remote org1 orchestrator -> org1 helper -> org1 CCAAS
+   -> compare results
+   -> merge endorsements
+   -> submit to Fabric-X orderer
+   -> wait for Notification Service finality
 ```
 
-## Layout
-
-```text
-cmd/orchestrator/   client-facing orchestrator and Fabric-X submit/finality path
-cmd/client/         small CLI for query/invoke through the orchestrator
-pkg/helper/         ProcessProposal service, ExecutionContext, Query adapter
-pkg/config/         YAML config structures
-pkg/orchestrator/   gRPC ProcessProposal, internal helper call, submitter, notification wait
-pkg/shim/           CCAAS connector and Fabric ChaincodeMessage handler
-sampleconfig/       configs wired to ../artifacts from the Project network
-```
-
-## Build
-
-Commands in this file assume your shell starts from the repository root.
-
-```bash
-cd compatibility_service
-go build -o bin/client ./cmd/client
-go build -o bin/orchestrator ./cmd/orchestrator
-```
-
-## Run
-
-Start the Project Fabric-X network and namespace first:
-
-```bash
-./scripts/start-network.sh
-./scripts/create-namespace.sh
-```
-
-Terminal 1 starts the external chaincode service:
-
-```bash
-cd sample_external_chaincode
-go build -o bin/sample-chaincode ./cmd/server
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
-```
-
-Terminal 2 starts the compatibility service:
-
-```bash
-cd compatibility_service
-./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
-```
-
-Terminal 2 prints the service logs. Look for loggers named `orchestrator`,
-`helper`, and `shim`. Some `grpc` logs can also appear in the same terminal.
-
-```text
-orchestrator: client proposal, helper call, submit, finality
-helper: proposal parse, execution result, Fabric-X endorsement
-shim: CCAAS connect, REGISTER, TRANSACTION, GET_STATE, PUT_STATE, DEL_STATE
-```
-
-`sampleconfig/orchestrator.yaml` sets `request-timeout: 45s`. That deadline
-covers the whole orchestrator request and must be greater than or equal to
-`finality-timeout`.
-
-At INFO level the logs show proposal receipt, internal helper execution,
-Fabric-X submission, and finality. At DEBUG level they also show the CCAAS shim
-GET_STATE, PUT_STATE, DEL_STATE, query view, and notification subscription
-steps. Run the client from another terminal with `FABRIC_LOGGING_SPEC=error`;
-client-side debug output is mostly gRPC internals.
-
-Use Terminal 3 for the demo client commands. The JSON response is printed by
-the client in Terminal 3.
-
-Without transient data:
-
-```bash
-cd compatibility_service
-FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2","value-v2","asset-v2-delete"]}'
-```
-
-With optional transient data:
-
-```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
-```
-
-`compatv2` seeds the temporary old and delete values inside the same
-invocation, so no setup `put` transactions are required. It also checks
-`stub.GetCreator()`, `cid.GetMSPID(stub)`, `cid.GetID(stub)`,
-`stub.GetBinding()`, `stub.GetDecorations()`, `stub.GetSignedProposal()`,
-`stub.GetTransient()`, and `stub.GetTxTimestamp()`.
-
-The final response should include `commit_status: "COMMITTED"`,
-`client_msp_id: "org-0"`, `binding_bytes: 32`, populated compatibility
-decorations, a timestamp, a present signed proposal, and non-empty
-creator/client identity fields. When transient data is supplied, the response
-should include those transient values.
-
-The idempotency key includes the client transaction ID. Re-running the same CLI
-command creates a fresh nonce and tx_id, so it is a new transaction. Duplicate
-delivery of the same signed proposal is replayed from the orchestrator's
-in-memory idempotency store.
-
-## Important Files
-
-- `pkg/helper/service.go`
-  - registers `peer.EndorserServer`
-  - parses signed proposals
-  - owns `ExecutionContext`
-  - reads state through Query Service
-  - builds Fabric-X endorsements
-
-- `pkg/helper/executor.go`
-  - adapts `endorsement.Invocation` to `pkg/shim.Invocation`
-  - converts the shim bridge result into `endorsement.ExecutionResult`
-
-- `pkg/shim/connector.go`
-  - opens the `peer.Chaincode/Connect` stream to the external chaincode service
-  - handles the initial `REGISTER` / `REGISTERED` / `READY` handshake
-  - defines the state interface satisfied by `ExecutionContext`
-
-- `pkg/shim/handler.go`
-  - sends `TRANSACTION`
-  - routes `GET_STATE`, `PUT_STATE`, and `DEL_STATE`
-  - returns the chaincode `COMPLETED` response and event payload
-
-- `pkg/orchestrator/service.go`
-  - accepts Fabric-X SDK signed proposals over gRPC
-  - calls the in-process helper path
-  - submits Fabric-X transactions
-  - waits on Notification Service and returns finality
-
-## V1 Scope
-
-Implemented for the sample chaincode:
-
-- `GetState`, `PutState`, `DelState`
-- read-your-writes overlay
-- `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
-- `GetTxID`, `GetChannelID`
-- `GetCreator`, `GetBinding`, `GetDecorations`, `GetSignedProposal`
-- `GetTransient`, `GetTxTimestamp`
-- `CreateCompositeKey`, `SplitCompositeKey`
-- `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
-- event payload propagation through the current SDK `Event []byte` path
-
-Deferred:
-
-- multi-organization helper coordination
-- range/rich/history queries
-- private data
-- cross-chaincode invocation
-- preserving the original Fabric event name instead of SDK default `log`
+The lifecycle definition records chaincode `name`, `version`, `sequence`,
+`init_required`, `initialized`, and each org's local package mapping.
+Endorsement policy is not stored in lifecycle state; it is resolved from the
+Fabric-X namespace through Query Service during transaction execution.

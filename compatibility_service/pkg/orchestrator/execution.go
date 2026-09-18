@@ -11,10 +11,7 @@ import (
 	"compatibility_service/pkg/helper"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
-	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
-	"github.com/hyperledger/fabric-x-sdk/network"
-	"google.golang.org/grpc/metadata"
 )
 
 type helperExecutionResult struct {
@@ -24,15 +21,15 @@ type helperExecutionResult struct {
 }
 
 func (s *Service) executeFresh(ctx context.Context, req InvocationRequest, namespace string, args [][]byte) (helperExecutionResult, error) {
-	s.logger.Infof("orchestrator calling in-process helper namespace=%s fn=%s args=%d",
-		namespace, req.Function, len(req.Args))
+	s.logger.Infof("orchestrator calling in-process helper namespace=%s chaincode=%s:%s fn=%s args=%d",
+		namespace, req.ChaincodeName, req.ChaincodeVersion, req.Function, len(req.Args))
 	clientProposal := helper.ClientProposalContext{
 		Creator:        req.ClientCreator,
 		Nonce:          req.ClientNonce,
 		SignedProposal: req.ClientSignedProposal,
-		Decorations:    compatibilityDecorations(namespace),
+		Decorations:    compatibilityDecorations(namespace, req.ChaincodeName, req.ChaincodeVersion),
 	}
-	end, err := s.executeHelper(ctx, namespace, "1.0", args, clientProposal)
+	end, err := s.executeHelper(ctx, namespace, "1.0", args, req.ClientTransient, clientProposal)
 	if err != nil {
 		return helperExecutionResult{}, err
 	}
@@ -65,7 +62,7 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 	if s != nil && s.cfg.Identity != nil {
 		localMSPID = s.cfg.Identity.MspID
 	}
-	remotesByMSP := s.remoteOrchestratorsByMSP()
+	remotesByMSP := s.remotes
 	availableRemoteMSPs := make(map[string]struct{}, len(remotesByMSP))
 	for mspID := range remotesByMSP {
 		availableRemoteMSPs[mspID] = struct{}{}
@@ -94,62 +91,13 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 		if !ok {
 			return nil, fmt.Errorf("remote orchestrator for msp %s is not configured", mspID)
 		}
-		result, err := s.executeRemoteOrchestrator(ctx, remote, req.ClientSignedProposal)
+		result, err := remote.EndorseOnly(ctx, req)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, result)
 	}
 	return results, nil
-}
-
-func (s *Service) remoteOrchestratorsByMSP() map[string]RemoteOrchestratorConfig {
-	out := make(map[string]RemoteOrchestratorConfig, len(s.cfg.RemoteOrgs))
-	for _, remote := range s.cfg.RemoteOrgs {
-		if remote.MSPID == "" {
-			continue
-		}
-		out[remote.MSPID] = remote
-	}
-	return out
-}
-
-func (s *Service) executeRemoteOrchestrator(ctx context.Context, remote RemoteOrchestratorConfig, prop *peer.SignedProposal) (helperExecutionResult, error) {
-	proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
-	if err != nil {
-		return helperExecutionResult{}, fmt.Errorf("unmarshal remote proposal: %w", err)
-	}
-	txID, err := txIDFromProposal(proposal)
-	if err != nil {
-		return helperExecutionResult{}, err
-	}
-
-	s.logger.Infof("tx=%s requesting remote orchestrator msp=%s endpoint=%s", txID, remote.MSPID, remote.Address())
-	remotePeer, err := network.NewPeer(remote.ToPeerConf())
-	if err != nil {
-		return helperExecutionResult{}, fmt.Errorf("remote orchestrator %s: %w", remote.MSPID, err)
-	}
-	defer remotePeer.Close() //nolint:errcheck
-
-	ctx = metadata.AppendToOutgoingContext(ctx, GRPCOperationMetadata, GRPCOperationEndorse)
-	resp, err := remotePeer.ProcessProposal(ctx, prop)
-	if err != nil {
-		return helperExecutionResult{}, fmt.Errorf("remote orchestrator %s endorsement: %w", remote.MSPID, err)
-	}
-	if resp == nil || resp.Response == nil {
-		return helperExecutionResult{}, fmt.Errorf("remote orchestrator %s returned no proposal response", remote.MSPID)
-	}
-	s.logger.Infof("tx=%s remote orchestrator msp=%s response status=%d tx_payload_bytes=%d endorsement_present=%t",
-		txID, remote.MSPID, resp.Response.Status, len(resp.Payload), resp.Endorsement != nil)
-
-	return helperExecutionResult{
-		Endorsement: sdk.Endorsement{
-			Proposal:  proposal,
-			Responses: []*peer.ProposalResponse{resp},
-		},
-		TxID:     txID,
-		Response: resp.Response,
-	}, nil
 }
 
 func compareCanonicalResults(local helperExecutionResult, remote []helperExecutionResult) error {

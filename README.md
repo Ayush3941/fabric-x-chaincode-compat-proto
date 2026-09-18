@@ -194,10 +194,11 @@ The orchestrator terminals show `[orchestrator]`, `[helper]`, `[shim]`, and
 Example service log lines:
 
 ```text
-[orchestrator] ProcessProposal -> tx=... operation=invoke channel=channelqc4 namespace=1 fn=compatv2 args=3
+[orchestrator] ProcessProposal -> tx=... operation=invoke channel=channelqc4 namespace=1 chaincode=sample:1.0 fn=compatv2 args=3
 [helper] ProcessProposal -> tx=... chaincode execution completed status=200 reads=2 writes=2
 [shim] sendTransaction -> tx=... shim TRANSACTION sent ccid=0:sample fn=compatv2 args=3
 [grpc] AddTraceEvent -> [core] [Channel #...] Channel Connectivity change to READY
+[orchestrator] submitLifecycleDefinition -> tx=... lifecycle finality status=COMMITTED block=...
 [orchestrator] submitAndWaitFinality -> tx=... finality status=COMMITTED block=3 txnum=0
 ```
 
@@ -219,10 +220,18 @@ Run from `compatibility_service` in Terminal 5 after both orchestrators are
 running:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle install -c sampleconfig/lifecycle-org0.yaml ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
-FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle queryinstalled -c sampleconfig/lifecycle-org0.yaml
-FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle install -c sampleconfig/lifecycle-org1.yaml ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
-FABRIC_LOGGING_SPEC=error ./bin/orchestrator lifecycle queryinstalled -c sampleconfig/lifecycle-org1.yaml
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
+./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
+./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml
+ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml | awk -F= '/^package_id=/{print $2; exit}')
+ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml | awk -F= '/^package_id=/{print $2; exit}')
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG"
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG"
+./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml -n sample -v 1.0
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml -n sample -v 1.0
 ```
 
 Expected org0 query output includes:
@@ -241,6 +250,47 @@ label=org1_sample_1
 
 The install store is in-memory SQLite inside each running orchestrator process.
 Restarting an orchestrator clears its installed-package list.
+The commit command submits a real Fabric-X transaction before updating local
+orchestrator stores. Its output includes:
+
+```text
+ledger_tx_id=...
+ledger_status=COMMITTED
+ledger_block_num=...
+ledger_namespace=0
+ledger_key=_lifecycle/chaincodes/sample:1.0
+```
+
+The ledger value records the shared lifecycle fields: `ccid`, `name`,
+`version`, `sequence`, `init_required`, and `initialized`. Package IDs and
+CCAAS endpoints remain org-local. Endorsement policy is resolved from the
+Fabric-X namespace through Query Service when the client invokes a transaction.
+
+## Init-Required Lifecycle
+
+Use `--init-required` during approval and commit when the definition must block
+normal invokes until one init transaction commits:
+
+```bash
+ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml | awk -F= '/^package_id=/{print $2; exit}')
+ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml | awk -F= '/^package_id=/{print $2; exit}')
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0 --sequence 1 --package-id "$ORG0_PKG" --init-required
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0 --sequence 1 --init-required
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml -n sample-init -v 1.0
+```
+
+Before init, normal invoke/query for `sample-init:1.0` is rejected. Run the
+init transaction with `--is-init`:
+
+```bash
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"compatv2","Args":["asset-init-guard","value-init-guard","asset-init-guard-delete"]}'
+```
+
+After that transaction commits, both orchestrators report `initialized=true`.
+The orchestrator also writes a lifecycle marker transaction in namespace `0`
+for `_lifecycle/chaincodes/sample-init:1.0`.
 
 ## Run Compatv2
 
@@ -248,13 +298,13 @@ Run from `compatibility_service` in Terminal 5:
 
 ```bash
 mkdir -p ../runtime/compatibility_service
-FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
 ```
 
 With transient data:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client invoke -c sampleconfig/client.yaml '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
 ```
 
 `compatv2` is implemented in
@@ -305,7 +355,7 @@ request handling, also called idempotency:
 Run from `compatibility_service` in Terminal 5:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-multiorg-v2"]}'
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v2"]}'
 ```
 
 Expected:
@@ -317,7 +367,7 @@ value-multiorg-v2
 Run:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/client query -c sampleconfig/client.yaml '{"Function":"get","Args":["asset-multiorg-v2-delete"]}'
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v2-delete"]}'
 ```
 
 Expected: empty output.
@@ -328,13 +378,13 @@ Run from the repository root:
 
 ```bash
 txid=$(python3 -c 'import json; print(json.load(open("runtime/compatibility_service/compatv2-result.json"))["tx_id"])')
-FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid "$txid"
+./bin/block-dump -artifacts ./artifacts -txid "$txid"
 ```
 
 Without the saved result file, copy the `tx_id` printed by the client and run:
 
 ```bash
-FABRIC_LOGGING_SPEC=error ./bin/block-dump -artifacts ./artifacts -txid <tx_id>
+./bin/block-dump -artifacts ./artifacts -txid <tx_id>
 ```
 
 Expected block shape:
@@ -358,7 +408,7 @@ Run unit tests from the repository root:
 
 ```bash
 cd compatibility_service
-go test ./pkg/orchestrator ./pkg/shim
+go test ./pkg/lifecycle ./pkg/orchestrator ./pkg/shim
 cd ..
 ```
 
@@ -366,7 +416,7 @@ Run the real-network integration tests after Fresh Setup:
 
 ```bash
 cd compatibility_service
-FABRIC_LOGGING_SPEC=error go test -tags=e2e ./integration/e2e -count=1 -v
+go test -tags=e2e ./integration/e2e -count=1 -v
 cd ..
 ```
 
