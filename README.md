@@ -28,6 +28,9 @@ and can be inspected with `bin/block-dump`.
 - Remote orchestrator execution when policy needs another MSP.
 - Result matching before submit.
 - Merged Fabric-X SDK endorsement responses.
+- Lifecycle package, install, approve, readiness, commit, query, and init gate.
+- Restart sync of committed lifecycle definitions from the Fabric-X ledger.
+- Lazy CCAAS connection resolution through a TLS gRPC dynamic resolver.
 - Fabric-X orderer submission and Notification Service finality.
 - `GetState`, `PutState`, `DelState`, read-your-writes.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
@@ -113,6 +116,7 @@ Run from the repository root:
 cd compatibility_service
 go build -o bin/client ./cmd/client
 go build -o bin/orchestrator ./cmd/orchestrator
+go build -o bin/resolver ./cmd/resolver
 cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
 cd ..
@@ -124,21 +128,18 @@ go build -o bin/block-dump ./cmd/block-dump
 Run from `compatibility_service`:
 
 ```bash
-mkdir -p ../sample_external_chaincode/cc_package/org0_sample
 ./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org0_sample --label org0_sample_1 --output ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
 ```
 
 For the org1 sample chaincode endpoint:
 
 ```bash
-mkdir -p ../sample_external_chaincode/cc_package/org1_sample
 ./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org1_sample --label org1_sample_1 --output ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
 ```
 
 For the integration-test chaincode:
 
 ```bash
-mkdir -p ../sample_external_chaincode/cc_package/e2e
 ./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/e2e --label e2e_1 --output ../sample_external_chaincode/cc_package/e2e/e2e.tgz
 ```
 
@@ -154,11 +155,12 @@ directory and produces a Fabric lifecycle package:
 
 ## Start Services
 
-Use four service terminals and one client terminal.
+Use five service terminals and one client terminal.
 
-The first two terminals run the external chaincode services. The next two run
-the org orchestrators and show service logs. Terminal 5 is the client terminal;
-it runs the demo commands and prints the JSON response.
+The first two terminals run the external chaincode services. The third terminal
+runs the dynamic resolver. The next two run the org orchestrators and show
+service logs. Terminal 6 is the client terminal; it runs the demo commands and
+prints the JSON response.
 
 Service terminal 1, org0 chaincode:
 
@@ -174,14 +176,21 @@ cd sample_external_chaincode
 ./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:10000
 ```
 
-Service terminal 3, org0 orchestrator:
+Service terminal 3, TLS gRPC resolver:
+
+```bash
+cd compatibility_service
+./bin/resolver -listen 127.0.0.1:9300 -tls-mode mtls -tls-cert ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt -tls-key ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key -client-ca ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem,../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
+```
+
+Service terminal 4, org0 orchestrator:
 
 ```bash
 cd compatibility_service
 ./bin/orchestrator -c sampleconfig/orchestrator.yaml --log-level DEBUG
 ```
 
-Service terminal 4, org1 orchestrator:
+Service terminal 5, org1 orchestrator:
 
 ```bash
 cd compatibility_service
@@ -207,6 +216,7 @@ Useful ports:
 ```text
 9999   org0 chaincode service
 10000  org1 chaincode service
+9300   TLS gRPC chaincode resolver
 9102   org0 orchestrator
 9202   org1 orchestrator
 4001   Notification Service / block query
@@ -216,7 +226,7 @@ Useful ports:
 
 ## Install CCAAS Packages
 
-Run from `compatibility_service` in Terminal 5 after both orchestrators are
+Run from `compatibility_service` in Terminal 6 after both orchestrators are
 running:
 
 ```bash
@@ -266,6 +276,17 @@ The ledger value records the shared lifecycle fields: `ccid`, `name`,
 CCAAS endpoints remain org-local. Endorsement policy is resolved from the
 Fabric-X namespace through Query Service when the client invokes a transaction.
 
+Lifecycle commits also update an append-only ledger index under
+`_lifecycle/index`. On orchestrator startup, committed definitions are loaded
+from that index back into the in-memory store. The orchestrator does not need
+installed-package rows after restart to know that a chaincode is committed.
+
+The sample orchestrator YAML files use `chaincode-resolver.mode: dynamic`.
+Both orchestrators call the TLS gRPC resolver at `127.0.0.1:9300` to map the
+local MSP plus `name/version/sequence` to that org's CCAAS address. The
+connection is resolved only when the chaincode is invoked and then cached in
+memory.
+
 ## Init-Required Lifecycle
 
 Use `--init-required` during approval and commit when the definition must block
@@ -294,7 +315,7 @@ for `_lifecycle/chaincodes/sample-init:1.0`.
 
 ## Run Compatv2
 
-Run from `compatibility_service` in Terminal 5:
+Run from `compatibility_service` in Terminal 6:
 
 ```bash
 mkdir -p ../runtime/compatibility_service
@@ -352,7 +373,7 @@ request handling, also called idempotency:
 
 ## Verify State
 
-Run from `compatibility_service` in Terminal 5:
+Run from `compatibility_service` in Terminal 6:
 
 ```bash
 ./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v2"]}'

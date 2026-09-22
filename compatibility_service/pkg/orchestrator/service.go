@@ -60,6 +60,7 @@ type Config struct {
 	Identity           *config.IdentityConfig        `mapstructure:"identity"`
 	QueryService       config.ClientConfig           `mapstructure:"query-service"`
 	ChaincodeSvc       config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
+	ChaincodeResolver  ChaincodeResolverConfig       `mapstructure:"chaincode-resolver"`
 	Orderer            *config.ClientConfig          `mapstructure:"orderer"`
 	NotificationSvc    *config.ClientConfig          `mapstructure:"notification-service"`
 	RemoteOrgs         []RemoteOrchestratorConfig    `mapstructure:"remote-orchestrators"`
@@ -151,6 +152,7 @@ type Service struct {
 	notify       committerpb.NotifierClient
 	idempotency  *idempotencyStore
 	lifecycle    *lifecycle.Store
+	resolver     chaincodeConnectionResolver
 	remotes      map[string]*OrchestratorContact
 	logger       sdk.Logger
 }
@@ -193,17 +195,26 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	queryService := committerpb.NewQueryServiceClient(queryPeer.Connection())
 	policies := newNamespacePolicyResolver(queryService)
 
-	shimConnector, err := shim.NewConnector(shim.Config{Endpoint: cfg.ChaincodeSvc.Address()})
-	if err != nil {
-		queryPeer.Close() //nolint:errcheck
-		return nil, fmt.Errorf("create shim connector: %w", err)
+	var shimConnector *shim.Connector
+	if cfg.ChaincodeSvc.Endpoint != nil {
+		shimConnector, err = shim.NewConnector(shim.Config{Endpoint: cfg.ChaincodeSvc.Address()})
+		if err != nil {
+			queryPeer.Close() //nolint:errcheck
+			return nil, fmt.Errorf("create shim connector: %w", err)
+		}
+		shimConnector.SetLogger(shimLogger)
 	}
-	shimConnector.SetLogger(shimLogger)
 
 	lifecycleStore, err := lifecycle.NewMemoryStore()
 	if err != nil {
 		queryPeer.Close() //nolint:errcheck
 		return nil, fmt.Errorf("create lifecycle store: %w", err)
+	}
+	resolver, err := newChaincodeConnectionResolver(cfg.ChaincodeResolver, orchestratorLogger)
+	if err != nil {
+		lifecycleStore.Close() //nolint:errcheck
+		queryPeer.Close()      //nolint:errcheck
+		return nil, fmt.Errorf("create chaincode resolver: %w", err)
 	}
 
 	helperCfg := helper.ServiceConfig{
@@ -212,7 +223,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		QueryService: cfg.QueryService.ToPeerConf(),
 	}
 	executors := map[string]helper.Executor{
-		"*": newLifecycleExecutor(lifecycleStore, cfg.Identity.MspID, shimConnector, shimLogger),
+		"*": newLifecycleExecutor(lifecycleStore, cfg.Identity.MspID, resolver, shimConnector, shimLogger),
 	}
 	helper, err := helper.NewWithSigner(helperCfg, signer, executors, helperLogger)
 	if err != nil {
@@ -267,9 +278,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		return nil, fmt.Errorf("create remote orchestrator contacts: %w", err)
 	}
 
-	orchestratorLogger.Infof("orchestrator initialized channel=%s default_namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
-		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
-	return &Service{
+	svc := &Service{
 		cfg:          cfg,
 		signer:       signer,
 		helper:       helper,
@@ -281,9 +290,18 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify:       notify,
 		idempotency:  newIdempotencyStore(),
 		lifecycle:    lifecycleStore,
+		resolver:     resolver,
 		remotes:      remoteContacts,
 		logger:       orchestratorLogger,
-	}, nil
+	}
+	if err := svc.syncLifecycleFromLedger(ctx); err != nil {
+		svc.Close() //nolint:errcheck
+		return nil, fmt.Errorf("sync lifecycle from ledger: %w", err)
+	}
+
+	orchestratorLogger.Infof("orchestrator initialized channel=%s default_namespace=%s protocol=%s helper=in-process request_timeout=%s finality_timeout=%s",
+		cfg.ChannelID, cfg.Namespace, protocolOrDefault(cfg.Protocol), cfg.requestTimeout(), cfg.finalityTimeout())
+	return svc, nil
 }
 
 // Validate checks the endpoints needed for the current single-service flow.
@@ -302,9 +320,6 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.QueryService.Endpoint == nil {
 		errs = append(errs, errors.New("query-service.endpoint is required"))
-	}
-	if cfg.ChaincodeSvc.Endpoint == nil {
-		errs = append(errs, errors.New("chaincode-service.endpoint is required"))
 	}
 	if cfg.Orderer == nil || cfg.Orderer.Endpoint == nil {
 		errs = append(errs, errors.New("orderer.endpoint is required"))
@@ -377,6 +392,9 @@ func (s *Service) Close() error {
 	}
 	if s.lifecycle != nil {
 		errs = append(errs, s.lifecycle.Close())
+	}
+	if closer, ok := s.resolver.(interface{ Close() error }); ok {
+		errs = append(errs, closer.Close())
 	}
 	if s.remotes != nil {
 		errs = append(errs, closeOrchestratorContacts(s.remotes))

@@ -50,9 +50,37 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 		return lifecycle.LedgerCommitResult{}, err
 	}
 
-	version, err := s.lifecycleKeyVersion(ctx, namespace, key)
+	defVersion, err := s.lifecycleKeyVersion(ctx, namespace, key)
 	if err != nil {
 		return lifecycle.LedgerCommitResult{}, fmt.Errorf("read lifecycle key version: %w", err)
+	}
+	highValue, highVersion, ok, err := s.lifecycleRow(ctx, namespace, lifecycle.LifecycleHighWatermarkKey)
+	if err != nil {
+		return lifecycle.LedgerCommitResult{}, fmt.Errorf("read lifecycle high watermark: %w", err)
+	}
+	highWatermark := uint64(0)
+	if ok {
+		highWatermark, err = lifecycle.UnmarshalLifecycleHighWatermark(highValue)
+		if err != nil {
+			return lifecycle.LedgerCommitResult{}, fmt.Errorf("decode lifecycle high watermark: %w", err)
+		}
+	}
+	nextIndex := highWatermark + 1
+	indexKey := lifecycle.LifecycleIndexEntryKey(nextIndex)
+	indexVersion, err := s.lifecycleKeyVersion(ctx, namespace, indexKey)
+	if err != nil {
+		return lifecycle.LedgerCommitResult{}, fmt.Errorf("read lifecycle index key version: %w", err)
+	}
+	if indexVersion != nil {
+		return lifecycle.LedgerCommitResult{}, fmt.Errorf("lifecycle index key %s already exists", indexKey)
+	}
+	eventType := lifecycle.LifecycleEventCommit
+	if initialized && def.InitRequired {
+		eventType = lifecycle.LifecycleEventInitialized
+	}
+	indexValue, err := lifecycle.MarshalLifecycleIndexEntry(lifecycle.NewLifecycleIndexEntry(nextIndex, eventType, def, initialized))
+	if err != nil {
+		return lifecycle.LedgerCommitResult{}, fmt.Errorf("marshal lifecycle index entry: %w", err)
 	}
 
 	args := [][]byte{
@@ -71,14 +99,34 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 	}
 
 	rws := blocks.ReadWriteSet{
-		Reads: []blocks.KVRead{{
-			Key:     key,
-			Version: version,
-		}},
-		Writes: []blocks.KVWrite{{
-			Key:   key,
-			Value: value,
-		}},
+		Reads: []blocks.KVRead{
+			{
+				Key:     key,
+				Version: defVersion,
+			},
+			{
+				Key:     lifecycle.LifecycleHighWatermarkKey,
+				Version: highVersion,
+			},
+			{
+				Key:     indexKey,
+				Version: indexVersion,
+			},
+		},
+		Writes: []blocks.KVWrite{
+			{
+				Key:   key,
+				Value: value,
+			},
+			{
+				Key:   indexKey,
+				Value: indexValue,
+			},
+			{
+				Key:   lifecycle.LifecycleHighWatermarkKey,
+				Value: lifecycle.MarshalLifecycleHighWatermark(nextIndex),
+			},
+		},
 	}
 	resp, err := efabx.NewEndorsementBuilder(s.signer).Endorse(inv, endorsement.Success(rws, nil, value))
 	if err != nil {
@@ -97,8 +145,8 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 		defer finality.Cancel()
 	}
 
-	s.logger.Infof("tx=%s submitting lifecycle definition namespace=%s key=%s ccid=%s sequence=%d initialized=%t",
-		inv.TxID, namespace, key, lifecycle.DefinitionCCID(def), def.Sequence, initialized)
+	s.logger.Infof("tx=%s submitting lifecycle definition namespace=%s key=%s index=%d ccid=%s sequence=%d initialized=%t",
+		inv.TxID, namespace, key, nextIndex, lifecycle.DefinitionCCID(def), def.Sequence, initialized)
 	if err := s.submitter.Submit(ctx, end); err != nil {
 		return lifecycle.LedgerCommitResult{}, fmt.Errorf("submit lifecycle transaction: %w", err)
 	}
@@ -130,6 +178,14 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 }
 
 func (s *Service) lifecycleKeyVersion(ctx context.Context, namespace, key string) (*blocks.Version, error) {
+	_, version, ok, err := s.lifecycleRow(ctx, namespace, key)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return version, nil
+}
+
+func (s *Service) lifecycleRow(ctx context.Context, namespace, key string) ([]byte, *blocks.Version, bool, error) {
 	rows, err := s.queryService.GetRows(ctx, &committerpb.Query{
 		Namespaces: []*committerpb.QueryNamespace{{
 			NsId: namespace,
@@ -137,7 +193,7 @@ func (s *Service) lifecycleKeyVersion(ctx context.Context, namespace, key string
 		}},
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	for _, ns := range rows.Namespaces {
 		if ns.GetNsId() != namespace {
@@ -145,9 +201,9 @@ func (s *Service) lifecycleKeyVersion(ctx context.Context, namespace, key string
 		}
 		for _, row := range ns.Rows {
 			if string(row.GetKey()) == key {
-				return &blocks.Version{BlockNum: row.GetVersion()}, nil
+				return append([]byte(nil), row.GetValue()...), &blocks.Version{BlockNum: row.GetVersion()}, true, nil
 			}
 		}
 	}
-	return nil, nil
+	return nil, nil, false, nil
 }

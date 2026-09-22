@@ -124,6 +124,65 @@ func TestMarkInitialized(t *testing.T) {
 	}
 }
 
+func TestUpsertCommittedFromLedgerDoesNotRequireApproval(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	def := testDefinition()
+	def.InitRequired = true
+
+	committed, err := store.UpsertCommittedFromLedger(ctx, def, false)
+	if err != nil {
+		t.Fatalf("UpsertCommittedFromLedger failed: %v", err)
+	}
+	if committed.Initialized {
+		t.Fatal("expected hydrated init-required definition to remain uninitialized")
+	}
+
+	committed, err = store.MarkInitialized(ctx, def, "org-0")
+	if err != nil {
+		t.Fatalf("MarkInitialized without approval failed: %v", err)
+	}
+	if !committed.Initialized {
+		t.Fatal("expected definition to be initialized")
+	}
+}
+
+func TestResolvedConnectionCache(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	def := testDefinition()
+
+	_, ok, err := store.GetResolvedConnection(ctx, "org-0", def)
+	if err != nil {
+		t.Fatalf("GetResolvedConnection failed: %v", err)
+	}
+	if ok {
+		t.Fatal("expected empty cache")
+	}
+
+	cached, err := store.PutResolvedConnection(ctx, ResolvedChaincodeConnection{
+		MSPID:    "org-0",
+		Name:     def.Name,
+		Version:  def.Version,
+		Sequence: def.Sequence,
+		Address:  "127.0.0.1:9999",
+	})
+	if err != nil {
+		t.Fatalf("PutResolvedConnection failed: %v", err)
+	}
+	if cached.TLSMode != "none" {
+		t.Fatalf("TLSMode = %q, want none", cached.TLSMode)
+	}
+
+	got, ok, err := store.GetResolvedConnection(ctx, "org-0", def)
+	if err != nil {
+		t.Fatalf("GetResolvedConnection cached failed: %v", err)
+	}
+	if !ok || got.Address != "127.0.0.1:9999" {
+		t.Fatalf("cached connection = %#v ok=%t", got, ok)
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := NewMemoryStore()

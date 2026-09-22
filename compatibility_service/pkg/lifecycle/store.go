@@ -54,6 +54,18 @@ type CommittedDefinition struct {
 	Initialized bool                `json:"initialized"`
 }
 
+// ResolvedChaincodeConnection is org-local CCAAS connection information
+// resolved lazily after lifecycle commit state is known.
+type ResolvedChaincodeConnection struct {
+	MSPID    string `json:"msp_id"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Sequence int64  `json:"sequence"`
+	Address  string `json:"address"`
+	TLSMode  string `json:"tls_mode,omitempty"`
+	CachedAt string `json:"cached_at"`
+}
+
 // Store keeps lifecycle state for one running orchestrator process.
 type Store struct {
 	db *sql.DB
@@ -114,6 +126,21 @@ CREATE TABLE IF NOT EXISTS committed_definitions (
 	init_required INTEGER NOT NULL,
 	initialized INTEGER NOT NULL,
 	committed_at TEXT NOT NULL
+)`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS resolved_connections (
+	msp_id TEXT NOT NULL,
+	ccid TEXT NOT NULL,
+	name TEXT NOT NULL,
+	version TEXT NOT NULL,
+	sequence INTEGER NOT NULL,
+	address TEXT NOT NULL,
+	tls_mode TEXT NOT NULL,
+	cached_at TEXT NOT NULL,
+	PRIMARY KEY(msp_id, ccid, sequence)
 )`)
 	return err
 }
@@ -325,10 +352,48 @@ func (s *Store) CommitDefinition(ctx context.Context, def ChaincodeDefinition, l
 		return CommittedDefinition{}, err
 	}
 
-	committed := CommittedDefinition{
+	return s.upsertCommitted(ctx, CommittedDefinition{
 		Definition:  def,
 		CommittedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Initialized: !def.InitRequired,
+	})
+}
+
+// UpsertCommittedFromLedger hydrates committed lifecycle state from the shared
+// Fabric-X lifecycle ledger. It does not require local package approval because
+// package and connection data remain org-local.
+func (s *Store) UpsertCommittedFromLedger(ctx context.Context, def ChaincodeDefinition, initialized bool) (CommittedDefinition, error) {
+	if err := validateDefinition(def); err != nil {
+		return CommittedDefinition{}, err
+	}
+	existing, ok, err := s.GetCommitted(ctx, def.Name, def.Version)
+	if err != nil {
+		return CommittedDefinition{}, err
+	}
+	if ok {
+		if existing.Definition.Sequence > def.Sequence {
+			return existing, nil
+		}
+		if existing.Definition.Sequence == def.Sequence &&
+			existing.Definition.InitRequired == def.InitRequired &&
+			existing.Initialized == initialized {
+			return existing, nil
+		}
+	}
+	return s.upsertCommitted(ctx, CommittedDefinition{
+		Definition:  def,
+		CommittedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Initialized: initialized,
+	})
+}
+
+func (s *Store) upsertCommitted(ctx context.Context, committed CommittedDefinition) (CommittedDefinition, error) {
+	def := committed.Definition
+	if err := validateDefinition(def); err != nil {
+		return CommittedDefinition{}, err
+	}
+	if committed.CommittedAt == "" {
+		committed.CommittedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO committed_definitions (
@@ -361,14 +426,7 @@ func (s *Store) MarkInitialized(ctx context.Context, def ChaincodeDefinition, lo
 	if err := validateDefinition(def); err != nil {
 		return CommittedDefinition{}, err
 	}
-	approved, err := s.HasMatchingApproval(ctx, def, localMSP)
-	if err != nil {
-		return CommittedDefinition{}, err
-	}
-	if !approved {
-		return CommittedDefinition{}, fmt.Errorf("definition name=%s sequence=%d is not approved by %s",
-			def.Name, def.Sequence, localMSP)
-	}
+	_ = localMSP
 
 	committed, ok, err := s.GetCommitted(ctx, def.Name, def.Version)
 	if err != nil {
@@ -498,6 +556,73 @@ func (s *Store) ResolveCommittedPackage(ctx context.Context, name, version, loca
 	return committed, pkg, true, nil
 }
 
+// GetResolvedConnection returns a cached org-local connection for a committed
+// definition sequence.
+func (s *Store) GetResolvedConnection(ctx context.Context, mspID string, def ChaincodeDefinition) (ResolvedChaincodeConnection, bool, error) {
+	if mspID == "" {
+		return ResolvedChaincodeConnection{}, false, fmt.Errorf("MSP ID is required")
+	}
+	ccid, err := ccidFromNameVersion(def.Name, def.Version)
+	if err != nil {
+		return ResolvedChaincodeConnection{}, false, err
+	}
+	row := s.db.QueryRowContext(ctx, `
+SELECT msp_id, name, version, sequence, address, tls_mode, cached_at
+FROM resolved_connections
+WHERE msp_id = ? AND ccid = ? AND sequence = ?`,
+		mspID, ccid, def.Sequence)
+	conn, err := scanResolvedConnection(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ResolvedChaincodeConnection{}, false, nil
+		}
+		return ResolvedChaincodeConnection{}, false, err
+	}
+	return conn, true, nil
+}
+
+// PutResolvedConnection caches a successful org-local connection resolution.
+func (s *Store) PutResolvedConnection(ctx context.Context, conn ResolvedChaincodeConnection) (ResolvedChaincodeConnection, error) {
+	if conn.MSPID == "" {
+		return ResolvedChaincodeConnection{}, fmt.Errorf("MSP ID is required")
+	}
+	def := ChaincodeDefinition{Name: conn.Name, Version: conn.Version, Sequence: conn.Sequence}
+	if err := validateDefinition(def); err != nil {
+		return ResolvedChaincodeConnection{}, err
+	}
+	if conn.Address == "" {
+		return ResolvedChaincodeConnection{}, fmt.Errorf("chaincode connection address is required")
+	}
+	if conn.TLSMode == "" {
+		conn.TLSMode = "none"
+	}
+	if conn.CachedAt == "" {
+		conn.CachedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	ccid := definitionCCID(def)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO resolved_connections (
+	msp_id, ccid, name, version, sequence, address, tls_mode, cached_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(msp_id, ccid, sequence) DO UPDATE SET
+	address = excluded.address,
+	tls_mode = excluded.tls_mode,
+	cached_at = excluded.cached_at`,
+		conn.MSPID,
+		ccid,
+		conn.Name,
+		conn.Version,
+		conn.Sequence,
+		conn.Address,
+		conn.TLSMode,
+		conn.CachedAt,
+	)
+	if err != nil {
+		return ResolvedChaincodeConnection{}, err
+	}
+	return conn, nil
+}
+
 // Close releases the SQLite connection.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
@@ -558,6 +683,20 @@ func scanCommitted(row rowScanner) (CommittedDefinition, error) {
 	committed.Definition.InitRequired = initRequired != 0
 	committed.Initialized = initialized != 0
 	return committed, err
+}
+
+func scanResolvedConnection(row rowScanner) (ResolvedChaincodeConnection, error) {
+	var conn ResolvedChaincodeConnection
+	err := row.Scan(
+		&conn.MSPID,
+		&conn.Name,
+		&conn.Version,
+		&conn.Sequence,
+		&conn.Address,
+		&conn.TLSMode,
+		&conn.CachedAt,
+	)
+	return conn, err
 }
 
 func validateDefinition(def ChaincodeDefinition) error {
