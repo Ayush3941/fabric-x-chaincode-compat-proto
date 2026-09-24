@@ -34,8 +34,16 @@ query-service:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1
 
+# Static CCAAS resolution example:
+# chaincode-resolver:
+#   static:
+#     - msp-id: org-0
+#       name: sample
+#       version: "1.0"
+#       address: 127.0.0.1:9999
+#       tls:
+#         mode: none
 chaincode-resolver:
-  mode: dynamic
   dynamic:
     endpoint:
       host: 127.0.0.1
@@ -72,15 +80,16 @@ notification-service:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1
 
-remote-orchestrators:
-  - msp-id: org-1
-    endpoint:
-      host: 127.0.0.1
-      port: 9202
-    tls:
-      mode: mtls
-      cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-      key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
-      ca-cert-paths:
-        - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
-      server-name: 127.0.0.1
+remote-orchestrator-resolver:
+  static:
+    - msp-id: org-1
+      endpoint:
+        host: 127.0.0.1
+        port: 9202
+      tls:
+        mode: mtls
+        cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
+        key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+        ca-cert-paths:
+          - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
+        server-name: 127.0.0.1

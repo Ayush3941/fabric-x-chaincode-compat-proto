@@ -10,7 +10,11 @@ import (
 	grpcencoding "google.golang.org/grpc/encoding"
 )
 
-const ServiceName = "compat.chaincode_resolver.Resolver"
+const (
+	ServiceName                  = "compat.chaincode_resolver.Resolver"
+	OperationChaincodeResolution = "CC_resolution"
+	OperationRemoteOrchestrator  = "REMOTE_ORCHESTRATOR_resolution"
+)
 
 func init() {
 	grpcencoding.RegisterCodec(jsonCodec{})
@@ -31,10 +35,15 @@ func (jsonCodec) Unmarshal(data []byte, v any) error {
 }
 
 type ResolveRequest struct {
-	MSPID    string `json:"msp_id"`
-	Name     string `json:"name"`
-	Version  string `json:"version"`
-	Sequence int64  `json:"sequence"`
+	Operation    string `json:"operation"`
+	MSPID        string `json:"msp_id,omitempty"`
+	RequesterMSP string `json:"requester_msp_id,omitempty"`
+	TargetMSP    string `json:"target_msp_id,omitempty"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Sequence     int64  `json:"sequence,omitempty"`
 }
 
 type ResolveResponse struct {

@@ -62,10 +62,9 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 	if s != nil && s.cfg.Identity != nil {
 		localMSPID = s.cfg.Identity.MspID
 	}
-	remotesByMSP := s.remotes
-	availableRemoteMSPs := make(map[string]struct{}, len(remotesByMSP))
-	for mspID := range remotesByMSP {
-		availableRemoteMSPs[mspID] = struct{}{}
+	var availableRemoteMSPs map[string]struct{}
+	if s != nil && s.remotes != nil {
+		availableRemoteMSPs = s.remotes.AvailableMSPs()
 	}
 
 	plan, rule, err := namespacePolicyPlan(policy, localMSPID, availableRemoteMSPs)
@@ -87,7 +86,17 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 
 	results := make([]helperExecutionResult, 0, len(plan.remoteMSPs))
 	for _, mspID := range plan.remoteMSPs {
-		remote, ok := remotesByMSP[mspID]
+		remote, ok, err := s.remotes.Resolve(ctx, remoteOrchestratorResolveRequest{
+			RequesterMSPID:   localMSPID,
+			TargetMSPID:      mspID,
+			ChannelID:        s.cfg.ChannelID,
+			Namespace:        policy.Namespace,
+			ChaincodeName:    req.ChaincodeName,
+			ChaincodeVersion: req.ChaincodeVersion,
+		})
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			return nil, fmt.Errorf("remote orchestrator for msp %s is not configured", mspID)
 		}

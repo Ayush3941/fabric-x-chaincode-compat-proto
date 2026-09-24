@@ -17,9 +17,11 @@ import (
 const defaultResolverTimeout = 5 * time.Second
 
 // ChaincodeResolverConfig controls lazy org-local CCAAS connection resolution.
-// Static mode reads mappings from YAML. Dynamic mode calls a user-provided
-// endpoint and remains independent of its underlying discovery mechanism.
+// Static entries are checked first. If no static entry matches, dynamic
+// resolution calls a user-provided endpoint and caches at the lifecycle layer.
 type ChaincodeResolverConfig struct {
+	// Mode is kept for older configs. Resolver behavior is structural:
+	// static and dynamic can coexist and static is checked first.
 	Mode    string                            `mapstructure:"mode"`
 	Static  []StaticChaincodeConnectionConfig `mapstructure:"static"`
 	Dynamic *DynamicChaincodeResolverConfig   `mapstructure:"dynamic"`
@@ -54,24 +56,51 @@ func newChaincodeConnectionResolver(cfg ChaincodeResolverConfig, logger sdk.Logg
 	if logger == nil {
 		logger = sdk.NoOpLogger{}
 	}
-	mode := cfg.Mode
-	if mode == "" {
-		if len(cfg.Static) > 0 {
-			mode = "static"
-		} else if cfg.Dynamic != nil {
-			mode = "dynamic"
+	var static *staticChaincodeResolver
+	if len(cfg.Static) > 0 {
+		var err error
+		static, err = newStaticChaincodeResolver(cfg.Static, logger)
+		if err != nil {
+			return nil, err
 		}
 	}
-	switch mode {
-	case "":
-		return nil, nil
-	case "static":
-		return newStaticChaincodeResolver(cfg.Static, logger)
-	case "dynamic":
-		return newGRPCChaincodeResolver(cfg.Dynamic, logger)
-	default:
-		return nil, fmt.Errorf("unknown chaincode resolver mode %q", mode)
+	var dynamic *grpcChaincodeResolver
+	if cfg.Dynamic != nil {
+		var err error
+		dynamic, err = newGRPCChaincodeResolver(cfg.Dynamic, logger)
+		if err != nil {
+			return nil, err
+		}
 	}
+	if static == nil && dynamic == nil {
+		return nil, nil
+	}
+	return &chaincodeConnectionResolvers{static: static, dynamic: dynamic}, nil
+}
+
+type chaincodeConnectionResolvers struct {
+	static  *staticChaincodeResolver
+	dynamic *grpcChaincodeResolver
+}
+
+func (r *chaincodeConnectionResolvers) Resolve(ctx context.Context, req chaincodeResolverRequest) (lifecycle.ResolvedChaincodeConnection, bool, error) {
+	if r.static != nil {
+		conn, ok, err := r.static.Resolve(ctx, req)
+		if err != nil || ok {
+			return conn, ok, err
+		}
+	}
+	if r.dynamic != nil {
+		return r.dynamic.Resolve(ctx, req)
+	}
+	return lifecycle.ResolvedChaincodeConnection{}, false, nil
+}
+
+func (r *chaincodeConnectionResolvers) Close() error {
+	if r == nil || r.dynamic == nil {
+		return nil
+	}
+	return r.dynamic.Close()
 }
 
 type staticChaincodeResolver struct {
@@ -185,10 +214,11 @@ func (r *grpcChaincodeResolver) Resolve(ctx context.Context, req chaincodeResolv
 	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	out, err := r.client.Resolve(resolveCtx, &ccresolver.ResolveRequest{
-		MSPID:    req.MSPID,
-		Name:     def.Name,
-		Version:  def.Version,
-		Sequence: def.Sequence,
+		Operation: ccresolver.OperationChaincodeResolution,
+		MSPID:     req.MSPID,
+		Name:      def.Name,
+		Version:   def.Version,
+		Sequence:  def.Sequence,
 	})
 	if err != nil {
 		return lifecycle.ResolvedChaincodeConnection{}, false, fmt.Errorf("dynamic chaincode resolver grpc: %w", err)

@@ -68,7 +68,14 @@ func (s *Service) markInitializedAfterCommit(ctx context.Context, def lifecycle.
 	if err != nil {
 		return fmt.Errorf("sign lifecycle initialized request: %w", err)
 	}
-	for _, remote := range s.remotes {
+	remotes, err := s.RemotePeers(ctx, lifecycle.RemotePeerRequest{
+		RequesterMSP: s.cfg.Identity.MspID,
+		Definition:   def,
+	})
+	if err != nil {
+		return fmt.Errorf("resolve remote lifecycle peers: %w", err)
+	}
+	for _, remote := range remotes {
 		res, err := remote.MarkInitialized(ctx, req)
 		if err != nil {
 			return err

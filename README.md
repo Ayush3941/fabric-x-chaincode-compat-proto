@@ -30,7 +30,7 @@ and can be inspected with `bin/block-dump`.
 - Merged Fabric-X SDK endorsement responses.
 - Lifecycle package, install, approve, readiness, commit, query, and init gate.
 - Restart sync of committed lifecycle definitions from the Fabric-X ledger.
-- Lazy CCAAS connection resolution through a TLS gRPC dynamic resolver.
+- Lazy CCAAS and remote orchestrator resolution through a TLS gRPC dynamic resolver.
 - Fabric-X orderer submission and Notification Service finality.
 - `GetState`, `PutState`, `DelState`, read-your-writes.
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`.
@@ -107,6 +107,10 @@ setup sequence.
 
 The namespace setup transactions are signed by both app orgs. That is separate
 from the policy stored inside each namespace.
+
+The namespace command may print a `context canceled` notification-listener line
+after `Transaction status: COMMITTED`; the committed status is the result to
+check.
 
 ## Build
 
@@ -216,7 +220,7 @@ Useful ports:
 ```text
 9999   org0 chaincode service
 10000  org1 chaincode service
-9300   TLS gRPC chaincode resolver
+9300   TLS gRPC resolver
 9102   org0 orchestrator
 9202   org1 orchestrator
 4001   Notification Service / block query
@@ -230,6 +234,7 @@ Run from `compatibility_service` in Terminal 6 after both orchestrators are
 running:
 
 ```bash
+export FABRIC_LOGGING_SPEC=error
 ./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
 ./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml
 ./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
@@ -281,11 +286,21 @@ Lifecycle commits also update an append-only ledger index under
 from that index back into the in-memory store. The orchestrator does not need
 installed-package rows after restart to know that a chaincode is committed.
 
-The sample orchestrator YAML files use `chaincode-resolver.mode: dynamic`.
-Both orchestrators call the TLS gRPC resolver at `127.0.0.1:9300` to map the
-local MSP plus `name/version/sequence` to that org's CCAAS address. The
-connection is resolved only when the chaincode is invoked and then cached in
-memory.
+Resolver configuration is structural. Under `chaincode-resolver` and
+`remote-orchestrator-resolver`, `static` and `dynamic` can coexist. Static
+entries are checked first. If no static entry matches, dynamic resolution calls
+the TLS gRPC resolver at `127.0.0.1:9300` lazily.
+
+For CCAAS endpoint lookup, the request includes `operation=CC_resolution` and
+maps the local MSP plus `name/version/sequence` to that org's CCAAS address.
+
+For remote orchestrator lookup, the request includes
+`operation=REMOTE_ORCHESTRATOR_resolution` and maps the target MSP plus the
+current `name/version/sequence` context to that org's orchestrator endpoint.
+The returned endpoint is connected with the local `contact-tls` settings from
+the orchestrator YAML.
+
+Dynamic connection results are resolved lazily and then cached in memory.
 
 ## Init-Required Lifecycle
 

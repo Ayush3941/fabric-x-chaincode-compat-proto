@@ -52,21 +52,22 @@ const (
 
 // Config contains the orchestrator wiring.
 type Config struct {
-	ChannelID          string                        `mapstructure:"channel-id"`
-	Namespace          string                        `mapstructure:"namespace"`
-	LifecycleNamespace string                        `mapstructure:"lifecycle-namespace"`
-	Protocol           string                        `mapstructure:"protocol"`
-	Server             *serve.ServerConfig           `mapstructure:"server"`
-	Identity           *config.IdentityConfig        `mapstructure:"identity"`
-	QueryService       config.ClientConfig           `mapstructure:"query-service"`
-	ChaincodeSvc       config.ChaincodeServiceConfig `mapstructure:"chaincode-service"`
-	ChaincodeResolver  ChaincodeResolverConfig       `mapstructure:"chaincode-resolver"`
-	Orderer            *config.ClientConfig          `mapstructure:"orderer"`
-	NotificationSvc    *config.ClientConfig          `mapstructure:"notification-service"`
-	RemoteOrgs         []RemoteOrchestratorConfig    `mapstructure:"remote-orchestrators"`
-	WaitAfterSubmit    time.Duration                 `mapstructure:"wait-after-submit"`
-	RequestTimeout     time.Duration                 `mapstructure:"request-timeout"`
-	FinalityTimeout    time.Duration                 `mapstructure:"finality-timeout"`
+	ChannelID          string                           `mapstructure:"channel-id"`
+	Namespace          string                           `mapstructure:"namespace"`
+	LifecycleNamespace string                           `mapstructure:"lifecycle-namespace"`
+	Protocol           string                           `mapstructure:"protocol"`
+	Server             *serve.ServerConfig              `mapstructure:"server"`
+	Identity           *config.IdentityConfig           `mapstructure:"identity"`
+	QueryService       config.ClientConfig              `mapstructure:"query-service"`
+	ChaincodeSvc       config.ChaincodeServiceConfig    `mapstructure:"chaincode-service"`
+	ChaincodeResolver  ChaincodeResolverConfig          `mapstructure:"chaincode-resolver"`
+	Orderer            *config.ClientConfig             `mapstructure:"orderer"`
+	NotificationSvc    *config.ClientConfig             `mapstructure:"notification-service"`
+	RemoteOrgs         []RemoteOrchestratorConfig       `mapstructure:"remote-orchestrators"`
+	RemoteResolver     RemoteOrchestratorResolverConfig `mapstructure:"remote-orchestrator-resolver"`
+	WaitAfterSubmit    time.Duration                    `mapstructure:"wait-after-submit"`
+	RequestTimeout     time.Duration                    `mapstructure:"request-timeout"`
+	FinalityTimeout    time.Duration                    `mapstructure:"finality-timeout"`
 }
 
 // RemoteOrchestratorConfig is a static V2 routing entry for one organization.
@@ -153,7 +154,7 @@ type Service struct {
 	idempotency  *idempotencyStore
 	lifecycle    *lifecycle.Store
 	resolver     chaincodeConnectionResolver
-	remotes      map[string]*OrchestratorContact
+	remotes      remoteOrchestratorResolver
 	logger       sdk.Logger
 }
 
@@ -266,8 +267,11 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		notify = committerpb.NewNotifierClient(notifier.Connection())
 	}
 
-	remoteContacts, err := newOrchestratorContacts(cfg.RemoteOrgs, orchestratorLogger)
+	remoteResolver, err := newRemoteOrchestratorResolver(cfg.RemoteResolver, cfg.RemoteOrgs, orchestratorLogger)
 	if err != nil {
+		if closer, ok := resolver.(interface{ Close() error }); ok {
+			closer.Close() //nolint:errcheck
+		}
 		lifecycleStore.Close() //nolint:errcheck
 		if notifier != nil {
 			notifier.Close() //nolint:errcheck
@@ -275,7 +279,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		submitter.Close() //nolint:errcheck
 		helper.Close()    //nolint:errcheck
 		queryPeer.Close() //nolint:errcheck
-		return nil, fmt.Errorf("create remote orchestrator contacts: %w", err)
+		return nil, fmt.Errorf("create remote orchestrator resolver: %w", err)
 	}
 
 	svc := &Service{
@@ -291,7 +295,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		idempotency:  newIdempotencyStore(),
 		lifecycle:    lifecycleStore,
 		resolver:     resolver,
-		remotes:      remoteContacts,
+		remotes:      remoteResolver,
 		logger:       orchestratorLogger,
 	}
 	if err := svc.syncLifecycleFromLedger(ctx); err != nil {
@@ -369,7 +373,7 @@ func (s *Service) Run(ctx context.Context) error {
 // RegisterService implements serve.Registerer.
 func (s *Service) RegisterService(servers serve.Servers) {
 	peer.RegisterEndorserServer(servers.GRPC, s)
-	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServer(s.lifecycle, s.cfg.Identity.MspID, s.logger, s, lifecycleRemotes(s.remotes)...))
+	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServerWithRemoteProvider(s.lifecycle, s.cfg.Identity.MspID, s.logger, s, s))
 	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
 	reflection.Register(servers.GRPC)
 	s.logger.Infof("orchestrator gRPC ProcessProposal and lifecycle services registered")
@@ -397,9 +401,27 @@ func (s *Service) Close() error {
 		errs = append(errs, closer.Close())
 	}
 	if s.remotes != nil {
-		errs = append(errs, closeOrchestratorContacts(s.remotes))
+		errs = append(errs, s.remotes.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// RemotePeers implements lifecycle.RemotePeerProvider.
+func (s *Service) RemotePeers(ctx context.Context, req lifecycle.RemotePeerRequest) ([]lifecycle.RemotePeer, error) {
+	if s == nil || s.remotes == nil {
+		return nil, nil
+	}
+	requesterMSPID := req.RequesterMSP
+	if requesterMSPID == "" && s.cfg.Identity != nil {
+		requesterMSPID = s.cfg.Identity.MspID
+	}
+	return s.remotes.RemotePeers(ctx, remoteOrchestratorResolveRequest{
+		RequesterMSPID:   requesterMSPID,
+		ChannelID:        s.cfg.ChannelID,
+		ChaincodeName:    req.Definition.Name,
+		ChaincodeVersion: req.Definition.Version,
+		Sequence:         req.Definition.Sequence,
+	})
 }
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client.

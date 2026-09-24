@@ -18,11 +18,13 @@ import (
 )
 
 type server struct {
-	name        string
-	version     string
-	sequence    int64
-	org0Address string
-	org1Address string
+	name                    string
+	version                 string
+	sequence                int64
+	org0Address             string
+	org1Address             string
+	org0OrchestratorAddress string
+	org1OrchestratorAddress string
 }
 
 func main() {
@@ -33,6 +35,8 @@ func main() {
 		sequence    = flag.Int64("sequence", 0, "chaincode sequence to resolve; 0 accepts any sequence")
 		org0Address = flag.String("org0-address", "127.0.0.1:9999", "org-0 CCAAS address")
 		org1Address = flag.String("org1-address", "127.0.0.1:10000", "org-1 CCAAS address")
+		org0Orch    = flag.String("org0-orchestrator", "127.0.0.1:9102", "org-0 orchestrator address")
+		org1Orch    = flag.String("org1-orchestrator", "127.0.0.1:9202", "org-1 orchestrator address")
 		tlsMode     = flag.String("tls-mode", "mtls", "TLS mode: tls or mtls")
 		tlsCert     = flag.String("tls-cert", "", "resolver server TLS certificate")
 		tlsKey      = flag.String("tls-key", "", "resolver server TLS private key")
@@ -54,11 +58,13 @@ func main() {
 	opts := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}
 	grpcServer := grpc.NewServer(opts...)
 	ccresolver.RegisterResolverServer(grpcServer, server{
-		name:        *name,
-		version:     *version,
-		sequence:    *sequence,
-		org0Address: *org0Address,
-		org1Address: *org1Address,
+		name:                    *name,
+		version:                 *version,
+		sequence:                *sequence,
+		org0Address:             *org0Address,
+		org1Address:             *org1Address,
+		org0OrchestratorAddress: *org0Orch,
+		org1OrchestratorAddress: *org1Orch,
 	})
 
 	fmt.Fprintf(os.Stderr, "resolver gRPC listening on %s tls=%s\n", *listen, *tlsMode)
@@ -69,11 +75,25 @@ func main() {
 }
 
 func (s server) Resolve(_ context.Context, req *ccresolver.ResolveRequest) (*ccresolver.ResolveResponse, error) {
-	if req == nil || req.Name != s.name || req.Version != s.version {
+	if req == nil {
 		return &ccresolver.ResolveResponse{}, nil
 	}
-	if s.sequence > 0 && req.Sequence != s.sequence {
+	switch req.Operation {
+	case ccresolver.OperationChaincodeResolution:
+		return s.resolveChaincode(req), nil
+	case ccresolver.OperationRemoteOrchestrator:
+		return s.resolveRemoteOrchestrator(req), nil
+	default:
 		return &ccresolver.ResolveResponse{}, nil
+	}
+}
+
+func (s server) resolveChaincode(req *ccresolver.ResolveRequest) *ccresolver.ResolveResponse {
+	if req.Name != s.name || req.Version != s.version {
+		return &ccresolver.ResolveResponse{}
+	}
+	if s.sequence > 0 && req.Sequence != s.sequence {
+		return &ccresolver.ResolveResponse{}
 	}
 	address := ""
 	switch req.MSPID {
@@ -82,13 +102,34 @@ func (s server) Resolve(_ context.Context, req *ccresolver.ResolveRequest) (*ccr
 	case "org-1":
 		address = s.org1Address
 	default:
-		return &ccresolver.ResolveResponse{}, nil
+		return &ccresolver.ResolveResponse{}
 	}
 	return &ccresolver.ResolveResponse{
 		Found:   true,
 		Address: address,
 		TLSMode: "none",
-	}, nil
+	}
+}
+
+func (s server) resolveRemoteOrchestrator(req *ccresolver.ResolveRequest) *ccresolver.ResolveResponse {
+	targetMSP := req.TargetMSP
+	if targetMSP == "" {
+		targetMSP = req.MSPID
+	}
+	address := ""
+	switch targetMSP {
+	case "org-0":
+		address = s.org0OrchestratorAddress
+	case "org-1":
+		address = s.org1OrchestratorAddress
+	default:
+		return &ccresolver.ResolveResponse{}
+	}
+	return &ccresolver.ResolveResponse{
+		Found:   true,
+		Address: address,
+		TLSMode: "mtls",
+	}
 }
 
 func loadServerTLSConfig(mode, certPath, keyPath string, caPaths []string) (*tls.Config, error) {

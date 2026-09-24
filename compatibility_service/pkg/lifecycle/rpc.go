@@ -177,17 +177,44 @@ type RemotePeer interface {
 	MarkInitialized(context.Context, *SignedRequest) (*MarkInitializedResponse, error)
 }
 
+// RemotePeerRequest carries the lifecycle definition context used to resolve
+// remote orchestrator peers.
+type RemotePeerRequest struct {
+	RequesterMSP string
+	Definition   ChaincodeDefinition
+}
+
+// RemotePeerProvider resolves remote orchestrator peers when lifecycle
+// operations need to coordinate across organizations.
+type RemotePeerProvider interface {
+	RemotePeers(context.Context, RemotePeerRequest) ([]RemotePeer, error)
+}
+
+type staticRemotePeerProvider struct {
+	remotes []RemotePeer
+}
+
+func (p staticRemotePeerProvider) RemotePeers(context.Context, RemotePeerRequest) ([]RemotePeer, error) {
+	return append([]RemotePeer(nil), p.remotes...), nil
+}
+
 // Server implements lifecycle install/queryinstalled for one orchestrator.
 type Server struct {
 	store           *Store
 	mspID           string
 	logger          sdk.Logger
 	ledgerCommitter LedgerCommitter
-	remotes         []RemotePeer
+	remotes         RemotePeerProvider
 }
 
 // NewServer creates the lifecycle service for a running orchestrator.
 func NewServer(store *Store, mspID string, logger sdk.Logger, ledgerCommitter LedgerCommitter, remotes ...RemotePeer) *Server {
+	return NewServerWithRemoteProvider(store, mspID, logger, ledgerCommitter, staticRemotePeerProvider{remotes: remotes})
+}
+
+// NewServerWithRemoteProvider creates the lifecycle service with a dynamic
+// remote peer provider.
+func NewServerWithRemoteProvider(store *Store, mspID string, logger sdk.Logger, ledgerCommitter LedgerCommitter, remotes RemotePeerProvider) *Server {
 	if logger == nil {
 		logger = sdk.NoOpLogger{}
 	}
@@ -410,8 +437,12 @@ func (s *Server) Commit(ctx context.Context, req *SignedRequest) (*CommitRespons
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if aggregate {
+		remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: payload.Definition})
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "resolve remote lifecycle peers: %s", err)
+		}
 		remoteCtx := metadata.AppendToOutgoingContext(ctx, localOnlyMetadata, "true")
-		for _, remote := range s.remotes {
+		for _, remote := range remotes {
 			if _, err := remote.Commit(remoteCtx, req); err != nil {
 				return nil, status.Errorf(codes.Internal, "remote commit %s: %s", remote.MSPID(), err)
 			}
@@ -464,8 +495,12 @@ func (s *Server) checkCommitReadiness(ctx context.Context, signedReq *SignedRequ
 	if !aggregate {
 		return approvals, nil
 	}
+	remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: def})
+	if err != nil {
+		return nil, err
+	}
 	remoteCtx := metadata.AppendToOutgoingContext(ctx, localOnlyMetadata, "true")
-	for _, remote := range s.remotes {
+	for _, remote := range remotes {
 		res, err := remote.CheckCommitReadiness(remoteCtx, signedReq)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "remote readiness %s: %s", remote.MSPID(), err)
@@ -475,6 +510,13 @@ func (s *Server) checkCommitReadiness(ctx context.Context, signedReq *SignedRequ
 		}
 	}
 	return approvals, nil
+}
+
+func (s *Server) remotePeers(ctx context.Context, req RemotePeerRequest) ([]RemotePeer, error) {
+	if s.remotes == nil {
+		return nil, nil
+	}
+	return s.remotes.RemotePeers(ctx, req)
 }
 
 func (s *Server) verifyAndUnmarshal(req *SignedRequest, payload any) (string, error) {

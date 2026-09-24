@@ -35,7 +35,6 @@ query-service:
     server-name: 127.0.0.1
 
 chaincode-resolver:
-  mode: dynamic
   dynamic:
     endpoint:
       host: 127.0.0.1
@@ -72,12 +71,21 @@ notification-service:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1
 
-remote-orchestrators:
-  - msp-id: org-0
+remote-orchestrator-resolver:
+  dynamic:
+    msp-ids:
+      - org-0
     endpoint:
       host: 127.0.0.1
-      port: 9102
+      port: 9300
     tls:
+      mode: mtls
+      cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
+      key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
+      ca-cert-paths:
+        - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
+      server-name: 127.0.0.1
+    contact-tls:
       mode: mtls
       cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.crt
       key-path: ../artifacts/peerOrganizations/peer-org-1/peers/helper.peer-org-1/tls/server.key
