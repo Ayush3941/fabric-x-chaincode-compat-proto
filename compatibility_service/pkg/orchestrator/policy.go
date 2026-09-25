@@ -228,11 +228,16 @@ func namespacePolicyPlan(policy NamespacePolicySnapshot, localMSPID string, avai
 		}
 		return plan, "msp", nil
 	case *applicationpb.NamespacePolicy_ThresholdRule:
-		scheme := ""
-		if rule.ThresholdRule != nil {
-			scheme = rule.ThresholdRule.GetScheme()
+		if rule.ThresholdRule == nil {
+			return namespacePolicyExecutionPlan{}, "threshold", fmt.Errorf("namespace %q threshold policy is nil", policy.Namespace)
 		}
-		return namespacePolicyExecutionPlan{}, "threshold", fmt.Errorf("namespace %q uses threshold policy %q; current orchestrator only supports MSP policy routing", policy.Namespace, scheme)
+		if rule.ThresholdRule.GetScheme() == "" {
+			return namespacePolicyExecutionPlan{}, "threshold", fmt.Errorf("namespace %q threshold policy scheme is empty", policy.Namespace)
+		}
+		if len(rule.ThresholdRule.GetPublicKey()) == 0 && rule.ThresholdRule.GetScheme() != "NONE" {
+			return namespacePolicyExecutionPlan{}, "threshold", fmt.Errorf("namespace %q threshold policy public key is empty", policy.Namespace)
+		}
+		return namespacePolicyExecutionPlan{satisfied: true}, "threshold", nil
 	default:
 		return namespacePolicyExecutionPlan{}, "", fmt.Errorf("namespace %q has unsupported policy rule %T", policy.Namespace, rule)
 	}

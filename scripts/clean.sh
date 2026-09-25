@@ -28,8 +28,10 @@ rm -rf \
   "${PROJECT_ROOT}/runtime/compatibility_service" \
   "${PROJECT_ROOT}/compatibility_service/runtime" \
   "${PROJECT_ROOT}/sample_external_chaincode/runtime" \
+  "${PROJECT_ROOT}/sample_external_resolver/runtime" \
   "${PROJECT_ROOT}/compatibility_service/bin" \
   "${PROJECT_ROOT}/sample_external_chaincode/bin" \
+  "${PROJECT_ROOT}/sample_external_resolver/bin" \
   "${PROJECT_ROOT}/bin/block-dump" \
   "${PROJECT_ROOT}/bin/rws-smoke" \
   "${PROJECT_ROOT}/.tmp" \

@@ -236,22 +236,79 @@ func TestLocalMSPSatisfiesNamespacePolicyRejectsRemoteOnlyOR(t *testing.T) {
 	}
 }
 
-func TestLocalMSPSatisfiesNamespacePolicyRejectsThresholdRule(t *testing.T) {
+func TestLocalMSPSatisfiesNamespacePolicySupportsThresholdRule(t *testing.T) {
 	policy := NamespacePolicySnapshot{
 		Namespace: "0",
 		Policy: &applicationpb.NamespacePolicy{
 			Rule: &applicationpb.NamespacePolicy_ThresholdRule{
-				ThresholdRule: &applicationpb.ThresholdRule{Scheme: "ECDSA"},
+				ThresholdRule: &applicationpb.ThresholdRule{Scheme: "ECDSA", PublicKey: []byte("public-key")},
 			},
 		},
 	}
 
-	_, rule, err := localMSPSatisfiesNamespacePolicy(policy, "org-0")
+	satisfied, rule, err := localMSPSatisfiesNamespacePolicy(policy, "org-0")
 	if rule != "threshold" {
 		t.Fatalf("expected threshold rule, got %q", rule)
 	}
-	if err == nil || !strings.Contains(err.Error(), "threshold policy") {
-		t.Fatalf("expected threshold policy error, got %v", err)
+	if err != nil {
+		t.Fatalf("localMSPSatisfiesNamespacePolicy returned error: %v", err)
+	}
+	if !satisfied {
+		t.Fatal("threshold policy should be treated as locally executable")
+	}
+}
+
+func TestNamespacePolicyPlanRejectsInvalidThresholdRule(t *testing.T) {
+	tests := []struct {
+		name      string
+		rule      *applicationpb.ThresholdRule
+		errorText string
+	}{
+		{
+			name:      "nil threshold rule",
+			errorText: "threshold policy is nil",
+		},
+		{
+			name:      "empty scheme",
+			rule:      &applicationpb.ThresholdRule{PublicKey: []byte("public-key")},
+			errorText: "threshold policy scheme is empty",
+		},
+		{
+			name:      "empty public key",
+			rule:      &applicationpb.ThresholdRule{Scheme: "ECDSA"},
+			errorText: "threshold policy public key is empty",
+		},
+		{
+			name: "none scheme allows empty key",
+			rule: &applicationpb.ThresholdRule{Scheme: "NONE"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := NamespacePolicySnapshot{
+				Namespace: "0",
+				Policy: &applicationpb.NamespacePolicy{
+					Rule: &applicationpb.NamespacePolicy_ThresholdRule{ThresholdRule: test.rule},
+				},
+			}
+			plan, rule, err := namespacePolicyPlan(policy, "org-0", nil)
+			if rule != "threshold" {
+				t.Fatalf("expected threshold rule, got %q", rule)
+			}
+			if test.errorText != "" {
+				if err == nil || !strings.Contains(err.Error(), test.errorText) {
+					t.Fatalf("expected error containing %q, got %v", test.errorText, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("namespacePolicyPlan returned error: %v", err)
+			}
+			if !plan.satisfied || len(plan.remoteMSPs) != 0 {
+				t.Fatalf("expected local threshold plan, got satisfied=%t remotes=%v", plan.satisfied, plan.remoteMSPs)
+			}
+		})
 	}
 }
 

@@ -10,6 +10,7 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 FXCONFIG_ORG0="${ARTIFACTS_DIR}/fxconfig-peer-org-0.yaml"
 FXCONFIG_ORG1="${ARTIFACTS_DIR}/fxconfig-peer-org-1.yaml"
+THRESHOLD_POLICY_CERT="${ARTIFACTS_DIR}/peerOrganizations/peer-org-0/users/client@peer-org-0/msp/signcerts/client@peer-org-0-cert.pem"
 mkdir -p "${ARTIFACTS_DIR}/fxconfig-tx"
 
 sed "s|ARTIFACTS_DIR|${ARTIFACTS_DIR}|g" \
@@ -97,4 +98,5 @@ if [ -n "${NAMESPACE:-}" ] || [ -n "${POLICY:-}" ]; then
 else
   create_namespace "0" "OR('org-0.member')"
   create_namespace "1" "AND('org-0.member','org-1.member')"
+  create_namespace "2" "threshold:${THRESHOLD_POLICY_CERT}"
 fi

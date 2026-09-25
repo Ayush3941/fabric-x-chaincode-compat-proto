@@ -25,6 +25,7 @@ and can be inspected with `bin/block-dump`.
 - External Go chaincode through `shim.ChaincodeServer`.
 - Two organization static endorsement path: `org-0` and `org-1`.
 - Namespace policy lookup from Fabric-X Query Service.
+- MSP and threshold-rule namespace policies.
 - Remote orchestrator execution when policy needs another MSP.
 - Result matching before submit.
 - Merged Fabric-X SDK endorsement responses.
@@ -48,6 +49,7 @@ committed event name is currently the SDK default `log`.
 ```text
 compatibility_service/       orchestrator, embedded helper path, client CLI
 sample_external_chaincode/   external Go chaincode service
+sample_external_resolver/    sample user-owned resolver service
 cmd/block-dump/              readable committed block dump
 cmd/rws-smoke/               low-level Fabric-X RW-set smoke client
 scripts/                     build, setup, start, stop helpers
@@ -98,8 +100,9 @@ Run from the repository root:
 ./scripts/create-namespace.sh
 ```
 
-The last command creates namespace `0` with `OR('org-0.member')` and namespace
-`1` with `AND('org-0.member','org-1.member')`.
+The last command creates namespace `0` with `OR('org-0.member')`, namespace
+`1` with `AND('org-0.member','org-1.member')`, and namespace `2` with a
+threshold policy bound to the org0 client certificate.
 
 If those namespaces already exist, `create-namespace.sh` skips them. For a
 fully clean ledger and namespace state, run `./scripts/clean.sh` before this
@@ -120,9 +123,10 @@ Run from the repository root:
 cd compatibility_service
 go build -o bin/client ./cmd/client
 go build -o bin/orchestrator ./cmd/orchestrator
-go build -o bin/resolver ./cmd/resolver
 cd ../sample_external_chaincode
 go build -o bin/sample-chaincode ./cmd/server
+cd ../sample_external_resolver
+go build -o bin/sample-resolver ./cmd/server
 cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
@@ -183,8 +187,8 @@ cd sample_external_chaincode
 Service terminal 3, TLS gRPC resolver:
 
 ```bash
-cd compatibility_service
-./bin/resolver -listen 127.0.0.1:9300 -tls-mode mtls -tls-cert ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt -tls-key ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key -client-ca ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem,../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
+cd sample_external_resolver
+./bin/sample-resolver -listen 127.0.0.1:9300 -tls-mode mtls -tls-cert ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt -tls-key ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key -client-ca ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem,../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
 ```
 
 Service terminal 4, org0 orchestrator:
@@ -343,6 +347,12 @@ With transient data:
 ./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
 ```
 
+Against threshold-policy namespace `2`:
+
+```bash
+./bin/client invoke -c sampleconfig/client.yaml --namespace 2 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-threshold-v2","value-threshold-v2","asset-threshold-v2-delete"]}' | tee ../runtime/compatibility_service/threshold-compatv2-result.json
+```
+
 `compatv2` is implemented in
 `sample_external_chaincode/cmd/server/main.go`. It is normal Fabric chaincode
 code. It checks state operations, context APIs, transient data, timestamp,
@@ -485,3 +495,12 @@ Full cleanup:
 
 This removes generated artifacts, local runtime state, service binaries, and
 local build caches. Run the fresh setup and build commands again after it.
+
+Reset only the Fabric-X ledger and orderer storage while keeping generated
+artifacts and binaries:
+
+```bash
+./scripts/reset-ledger.sh
+./scripts/start-network.sh
+./scripts/create-namespace.sh
+```
