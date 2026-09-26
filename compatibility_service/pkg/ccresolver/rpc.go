@@ -22,18 +22,6 @@ func init() {
 
 type jsonCodec struct{}
 
-func (jsonCodec) Name() string {
-	return "compat-json"
-}
-
-func (jsonCodec) Marshal(v any) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-func (jsonCodec) Unmarshal(data []byte, v any) error {
-	return json.Unmarshal(data, v)
-}
-
 type ResolveRequest struct {
 	Operation    string `json:"operation"`
 	MSPID        string `json:"msp_id,omitempty"`
@@ -58,6 +46,18 @@ type ResolverServer interface {
 
 type Client struct {
 	conn grpc.ClientConnInterface
+}
+
+func (jsonCodec) Name() string {
+	return "compat-json"
+}
+
+func (jsonCodec) Marshal(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func (jsonCodec) Unmarshal(data []byte, v any) error {
+	return json.Unmarshal(data, v)
 }
 
 func NewClient(conn grpc.ClientConnInterface) *Client {
