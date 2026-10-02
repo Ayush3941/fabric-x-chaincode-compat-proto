@@ -35,9 +35,11 @@ type ResolveRequest struct {
 }
 
 type ResolveResponse struct {
-	Found   bool   `json:"found"`
-	Address string `json:"address,omitempty"`
-	TLSMode string `json:"tls_mode,omitempty"`
+	Found     bool   `json:"found"`
+	Address   string `json:"address,omitempty"`
+	TLSMode   string `json:"tls_mode,omitempty"`
+	PackageID string `json:"package_id,omitempty"`
+	Sequence  int64  `json:"sequence,omitempty"`
 }
 
 type ResolverServer interface {

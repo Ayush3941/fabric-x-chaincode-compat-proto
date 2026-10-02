@@ -249,7 +249,7 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, ccName, ccVers
 		orchestrator.GRPCNamespaceMetadata, namespace,
 		orchestrator.GRPCInitMetadata, fmt.Sprintf("%t", isInit),
 	)
-	resp, err := orchestratorPeer.ProcessProposal(ctx, prop)
+	resp, err := peer.NewEndorserClient(orchestratorPeer.Connection()).ProcessProposal(ctx, prop)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator grpc call failed: %w", err)
 	}

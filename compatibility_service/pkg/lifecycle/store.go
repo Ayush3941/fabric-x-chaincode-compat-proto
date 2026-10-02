@@ -57,13 +57,14 @@ type CommittedDefinition struct {
 // ResolvedChaincodeConnection is org-local CCAAS connection information
 // resolved lazily after lifecycle commit state is known.
 type ResolvedChaincodeConnection struct {
-	MSPID    string `json:"msp_id"`
-	Name     string `json:"name"`
-	Version  string `json:"version"`
-	Sequence int64  `json:"sequence"`
-	Address  string `json:"address"`
-	TLSMode  string `json:"tls_mode,omitempty"`
-	CachedAt string `json:"cached_at"`
+	MSPID     string `json:"msp_id"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Sequence  int64  `json:"sequence"`
+	Address   string `json:"address"`
+	TLSMode   string `json:"tls_mode,omitempty"`
+	PackageID string `json:"package_id,omitempty"`
+	CachedAt  string `json:"cached_at"`
 }
 
 // Store keeps lifecycle state for one running orchestrator process.
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS resolved_connections (
 	sequence INTEGER NOT NULL,
 	address TEXT NOT NULL,
 	tls_mode TEXT NOT NULL,
+	package_id TEXT NOT NULL,
 	cached_at TEXT NOT NULL,
 	PRIMARY KEY(msp_id, ccid, sequence)
 )`)
@@ -567,7 +569,7 @@ func (s *Store) GetResolvedConnection(ctx context.Context, mspID string, def Cha
 		return ResolvedChaincodeConnection{}, false, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT msp_id, name, version, sequence, address, tls_mode, cached_at
+SELECT msp_id, name, version, sequence, address, tls_mode, package_id, cached_at
 FROM resolved_connections
 WHERE msp_id = ? AND ccid = ? AND sequence = ?`,
 		mspID, ccid, def.Sequence)
@@ -602,11 +604,12 @@ func (s *Store) PutResolvedConnection(ctx context.Context, conn ResolvedChaincod
 	ccid := definitionCCID(def)
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO resolved_connections (
-	msp_id, ccid, name, version, sequence, address, tls_mode, cached_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	msp_id, ccid, name, version, sequence, address, tls_mode, package_id, cached_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(msp_id, ccid, sequence) DO UPDATE SET
 	address = excluded.address,
 	tls_mode = excluded.tls_mode,
+	package_id = excluded.package_id,
 	cached_at = excluded.cached_at`,
 		conn.MSPID,
 		ccid,
@@ -615,6 +618,7 @@ ON CONFLICT(msp_id, ccid, sequence) DO UPDATE SET
 		conn.Sequence,
 		conn.Address,
 		conn.TLSMode,
+		conn.PackageID,
 		conn.CachedAt,
 	)
 	if err != nil {
@@ -694,6 +698,7 @@ func scanResolvedConnection(row rowScanner) (ResolvedChaincodeConnection, error)
 		&conn.Sequence,
 		&conn.Address,
 		&conn.TLSMode,
+		&conn.PackageID,
 		&conn.CachedAt,
 	)
 	return conn, err

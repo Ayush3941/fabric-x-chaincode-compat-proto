@@ -18,6 +18,7 @@ type helperExecutionResult struct {
 	Endorsement sdk.Endorsement
 	TxID        string
 	Response    *peer.Response
+	Binding     *LifecycleExecutionBinding
 }
 
 func (s *Service) executeFresh(ctx context.Context, req InvocationRequest, namespace string, args [][]byte) (helperExecutionResult, error) {
@@ -43,10 +44,17 @@ func (s *Service) executeFresh(ctx context.Context, req InvocationRequest, names
 	if len(end.Responses) == 0 || end.Responses[0] == nil || end.Responses[0].Response == nil {
 		return helperExecutionResult{}, errors.New("helper returned no proposal response")
 	}
+	binding := s.lifecycleExecutionBinding(ctx, req, namespace)
+	if binding != nil {
+		s.logger.Infof("tx=%s lifecycle binding msp=%s namespace=%s chaincode=%s:%s sequence=%d package_id=%s endpoint=%s",
+			txID, binding.MSPID, binding.Namespace, binding.ChaincodeName, binding.ChaincodeVersion,
+			binding.Sequence, binding.PackageID, binding.PackageAddress)
+	}
 	return helperExecutionResult{
 		Endorsement: end,
 		TxID:        txID,
 		Response:    end.Responses[0].Response,
+		Binding:     binding,
 	}, nil
 }
 

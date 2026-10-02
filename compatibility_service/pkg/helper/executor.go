@@ -54,10 +54,11 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *Executio
 	}
 
 	return endorsement.ExecutionResult{
-		RWS:     execCtx.Result(),
-		Event:   res.Event,
-		Status:  res.Status,
-		Message: res.Message,
-		Payload: res.Payload,
+		RWS:       execCtx.Result(),
+		Event:     res.Event,
+		EventName: res.EventName,
+		Status:    res.Status,
+		Message:   res.Message,
+		Payload:   res.Payload,
 	}, ExecutionMetadata{QueryView: res.QueryView}, nil
 }

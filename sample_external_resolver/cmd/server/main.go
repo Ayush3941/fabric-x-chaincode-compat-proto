@@ -22,7 +22,9 @@ type server struct {
 	version                 string
 	sequence                int64
 	org0Address             string
+	org0PackageID           string
 	org1Address             string
+	org1PackageID           string
 	org0OrchestratorAddress string
 	org1OrchestratorAddress string
 }
@@ -34,7 +36,9 @@ func main() {
 		version     = flag.String("version", "1.0", "chaincode version to resolve")
 		sequence    = flag.Int64("sequence", 0, "chaincode sequence to resolve; 0 accepts any sequence")
 		org0Address = flag.String("org0-address", "127.0.0.1:9999", "org-0 CCAAS address")
+		org0Package = flag.String("org0-package-id", "", "org-0 local chaincode package ID")
 		org1Address = flag.String("org1-address", "127.0.0.1:10000", "org-1 CCAAS address")
+		org1Package = flag.String("org1-package-id", "", "org-1 local chaincode package ID")
 		org0Orch    = flag.String("org0-orchestrator", "127.0.0.1:9102", "org-0 orchestrator address")
 		org1Orch    = flag.String("org1-orchestrator", "127.0.0.1:9202", "org-1 orchestrator address")
 		tlsMode     = flag.String("tls-mode", "mtls", "TLS mode: tls or mtls")
@@ -62,7 +66,9 @@ func main() {
 		version:                 *version,
 		sequence:                *sequence,
 		org0Address:             *org0Address,
+		org0PackageID:           *org0Package,
 		org1Address:             *org1Address,
+		org1PackageID:           *org1Package,
 		org0OrchestratorAddress: *org0Orch,
 		org1OrchestratorAddress: *org1Orch,
 	})
@@ -96,18 +102,23 @@ func (s server) resolveChaincode(req *ccresolver.ResolveRequest) *ccresolver.Res
 		return &ccresolver.ResolveResponse{}
 	}
 	address := ""
+	packageID := ""
 	switch req.MSPID {
 	case "org-0":
 		address = s.org0Address
+		packageID = s.org0PackageID
 	case "org-1":
 		address = s.org1Address
+		packageID = s.org1PackageID
 	default:
 		return &ccresolver.ResolveResponse{}
 	}
 	return &ccresolver.ResolveResponse{
-		Found:   true,
-		Address: address,
-		TLSMode: "none",
+		Found:     true,
+		Address:   address,
+		TLSMode:   "none",
+		PackageID: packageID,
+		Sequence:  req.Sequence,
 	}
 }
 

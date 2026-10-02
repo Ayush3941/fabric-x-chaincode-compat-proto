@@ -324,6 +324,151 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 		}
 		return shim.Success(payload)
 
+	case "compat-v3":
+		if len(args) != 3 {
+			return shim.Error("compat-v3 expects 3 arguments: key value delete_key")
+		}
+		key, value, deleteKey := args[0], args[1], args[2]
+		seedOldValue := "old-value"
+		seedDeleteValue := "delete-me"
+
+		committedOldValue, err := stub.GetState(key)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		committedDeleteValue, err := stub.GetState(deleteKey)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		if err := stub.PutState(key, []byte(seedOldValue)); err != nil {
+			return shim.Error(err.Error())
+		}
+		oldValue, err := stub.GetState(key)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		if err := stub.PutState(key, []byte(value)); err != nil {
+			return shim.Error(err.Error())
+		}
+		afterPutValue, err := stub.GetState(key)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		if err := stub.PutState(deleteKey, []byte(seedDeleteValue)); err != nil {
+			return shim.Error(err.Error())
+		}
+		deleteOldValue, err := stub.GetState(deleteKey)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		if err := stub.DelState(deleteKey); err != nil {
+			return shim.Error(err.Error())
+		}
+		afterDeleteValue, err := stub.GetState(deleteKey)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		compositeKey, err := stub.CreateCompositeKey("compat-v3", []string{key, deleteKey})
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		splitObjectType, splitAttributes, err := stub.SplitCompositeKey(compositeKey)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		function, params := stub.GetFunctionAndParameters()
+		creator, err := stub.GetCreator()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		clientMSPID, err := cid.GetMSPID(stub)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		clientID, err := cid.GetID(stub)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		binding, err := stub.GetBinding()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		transient, err := stub.GetTransient()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		txTimestamp, err := stub.GetTxTimestamp()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		signedProposal, err := stub.GetSignedProposal()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		signedProposalBytes := 0
+		signedProposalSignatureBytes := 0
+		if signedProposal != nil {
+			signedProposalBytes = len(signedProposal.ProposalBytes)
+			signedProposalSignatureBytes = len(signedProposal.Signature)
+		}
+		decorations := byteMapToStrings(stub.GetDecorations())
+		payload, err := json.Marshal(map[string]any{
+			"args":                            byteArgsToStrings(stub.GetArgs()),
+			"string_args":                     stub.GetStringArgs(),
+			"function":                        function,
+			"parameters":                      params,
+			"tx_id":                           stub.GetTxID(),
+			"channel_id":                      stub.GetChannelID(),
+			"creator_bytes":                   len(creator),
+			"creator_base64":                  base64.StdEncoding.EncodeToString(creator),
+			"client_id":                       clientID,
+			"client_msp_id":                   clientMSPID,
+			"binding_bytes":                   len(binding),
+			"binding_base64":                  base64.StdEncoding.EncodeToString(binding),
+			"transient":                       byteMapToStrings(transient),
+			"transient_count":                 len(transient),
+			"tx_timestamp_seconds":            txTimestamp.GetSeconds(),
+			"tx_timestamp_nanos":              txTimestamp.GetNanos(),
+			"tx_timestamp_rfc3339":            timestampString(txTimestamp.GetSeconds(), txTimestamp.GetNanos()),
+			"decorations":                     decorations,
+			"signed_proposal_present":         signedProposal != nil,
+			"signed_proposal_bytes":           signedProposalBytes,
+			"signed_proposal_signature_bytes": signedProposalSignatureBytes,
+			"committed_old_value":             nullableString(committedOldValue),
+			"committed_delete_old_value":      nullableString(committedDeleteValue),
+			"seed_old_value":                  seedOldValue,
+			"seed_delete_value":               seedDeleteValue,
+			"old_value":                       nullableString(oldValue),
+			"after_put_value":                 nullableString(afterPutValue),
+			"delete_old_value":                nullableString(deleteOldValue),
+			"after_delete_value":              nullableString(afterDeleteValue),
+			"composite_key":                   compositeKey,
+			"split_object_type":               splitObjectType,
+			"split_attributes":                splitAttributes,
+			"ok_status":                       shim.OK,
+			"error_status":                    shim.ERROR,
+		})
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		eventPayload, err := json.Marshal(map[string]any{
+			"function":    function,
+			"key":         key,
+			"value":       value,
+			"deleted_key": deleteKey,
+		})
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		if err := stub.SetEvent("compat-v3-event", eventPayload); err != nil {
+			return shim.Error(err.Error())
+		}
+		return shim.Success(payload)
+
 	case "compaterror":
 		return shim.Error("compat error requested")
 

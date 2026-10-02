@@ -28,13 +28,14 @@ type ChaincodeResolverConfig struct {
 }
 
 type StaticChaincodeConnectionConfig struct {
-	MSPID    string           `mapstructure:"msp-id"`
-	Name     string           `mapstructure:"name"`
-	Version  string           `mapstructure:"version"`
-	Sequence int64            `mapstructure:"sequence"`
-	Address  string           `mapstructure:"address"`
-	Endpoint *config.Endpoint `mapstructure:"endpoint"`
-	TLS      config.TLSConfig `mapstructure:"tls"`
+	MSPID     string           `mapstructure:"msp-id"`
+	Name      string           `mapstructure:"name"`
+	Version   string           `mapstructure:"version"`
+	Sequence  int64            `mapstructure:"sequence"`
+	PackageID string           `mapstructure:"package-id"`
+	Address   string           `mapstructure:"address"`
+	Endpoint  *config.Endpoint `mapstructure:"endpoint"`
+	TLS       config.TLSConfig `mapstructure:"tls"`
 }
 
 type DynamicChaincodeResolverConfig struct {
@@ -146,15 +147,16 @@ func (r *staticChaincodeResolver) Resolve(_ context.Context, req chaincodeResolv
 			mode = "none"
 		}
 		conn := lifecycle.ResolvedChaincodeConnection{
-			MSPID:    req.MSPID,
-			Name:     def.Name,
-			Version:  def.Version,
-			Sequence: def.Sequence,
-			Address:  chaincodeResolverAddress(entry),
-			TLSMode:  mode,
+			MSPID:     req.MSPID,
+			Name:      def.Name,
+			Version:   def.Version,
+			Sequence:  def.Sequence,
+			Address:   chaincodeResolverAddress(entry),
+			TLSMode:   mode,
+			PackageID: entry.PackageID,
 		}
-		r.logger.Infof("chaincode resolver static match msp=%s name=%s version=%s sequence=%d endpoint=%s",
-			req.MSPID, def.Name, def.Version, def.Sequence, conn.Address)
+		r.logger.Infof("chaincode resolver static match msp=%s name=%s version=%s sequence=%d package_id=%s endpoint=%s",
+			req.MSPID, def.Name, def.Version, def.Sequence, conn.PackageID, conn.Address)
 		return conn, true, nil
 	}
 	return lifecycle.ResolvedChaincodeConnection{}, false, nil
@@ -229,6 +231,9 @@ func (r *grpcChaincodeResolver) Resolve(ctx context.Context, req chaincodeResolv
 	if out.Address == "" {
 		return lifecycle.ResolvedChaincodeConnection{}, false, fmt.Errorf("dynamic chaincode resolver response missing address")
 	}
+	if out.Sequence != 0 && out.Sequence != def.Sequence {
+		return lifecycle.ResolvedChaincodeConnection{}, false, fmt.Errorf("dynamic chaincode resolver sequence mismatch: requested=%d response=%d", def.Sequence, out.Sequence)
+	}
 	mode := out.TLSMode
 	if mode == "" {
 		mode = "none"
@@ -236,15 +241,16 @@ func (r *grpcChaincodeResolver) Resolve(ctx context.Context, req chaincodeResolv
 	if mode != "none" {
 		return lifecycle.ResolvedChaincodeConnection{}, false, fmt.Errorf("dynamic chaincode resolver returned unsupported tls mode %q", mode)
 	}
-	r.logger.Infof("chaincode resolver dynamic grpc match msp=%s name=%s version=%s sequence=%d endpoint=%s resolver=%s",
-		req.MSPID, def.Name, def.Version, def.Sequence, out.Address, r.address)
+	r.logger.Infof("chaincode resolver dynamic grpc match msp=%s name=%s version=%s sequence=%d package_id=%s endpoint=%s resolver=%s",
+		req.MSPID, def.Name, def.Version, def.Sequence, out.PackageID, out.Address, r.address)
 	return lifecycle.ResolvedChaincodeConnection{
-		MSPID:    req.MSPID,
-		Name:     def.Name,
-		Version:  def.Version,
-		Sequence: def.Sequence,
-		Address:  out.Address,
-		TLSMode:  mode,
+		MSPID:     req.MSPID,
+		Name:      def.Name,
+		Version:   def.Version,
+		Sequence:  def.Sequence,
+		Address:   out.Address,
+		TLSMode:   mode,
+		PackageID: out.PackageID,
 	}, true, nil
 }
 

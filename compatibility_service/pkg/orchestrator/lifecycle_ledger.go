@@ -14,8 +14,9 @@ import (
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
 	"github.com/hyperledger/fabric-x-sdk/endorsement"
+	efab "github.com/hyperledger/fabric-x-sdk/endorsement/fabric"
 	efabx "github.com/hyperledger/fabric-x-sdk/endorsement/fabricx"
-	"github.com/hyperledger/fabric-x-sdk/network"
+	nfab "github.com/hyperledger/fabric-x-sdk/network/fabric"
 )
 
 const lifecycleCommitFunction = "__lifecycle_commit"
@@ -89,11 +90,11 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 		[]byte(def.Version),
 		[]byte(strconv.FormatInt(def.Sequence, 10)),
 	}
-	prop, err := network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, "1.0", args)
+	prop, err := nfab.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, args)
 	if err != nil {
 		return lifecycle.LedgerCommitResult{}, fmt.Errorf("create lifecycle proposal: %w", err)
 	}
-	inv, err := endorsement.Parse(prop, time.Now())
+	inv, err := efab.Parse(prop, time.Now())
 	if err != nil {
 		return lifecycle.LedgerCommitResult{}, fmt.Errorf("parse lifecycle proposal: %w", err)
 	}
@@ -128,7 +129,7 @@ func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.C
 			},
 		},
 	}
-	resp, err := efabx.NewEndorsementBuilder(s.signer).Endorse(inv, endorsement.Success(rws, nil, value))
+	resp, err := efabx.NewEndorsementBuilder(s.signer).Endorse(inv, endorsement.Success(rws, "", nil, value))
 	if err != nil {
 		return lifecycle.LedgerCommitResult{}, fmt.Errorf("endorse lifecycle transaction: %w", err)
 	}

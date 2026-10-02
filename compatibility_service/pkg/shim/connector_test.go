@@ -75,6 +75,9 @@ func TestExecuteRunsCCAASMessageLoop(t *testing.T) {
 	if string(result.Event) != "event-payload" {
 		t.Fatalf("event = %q, want event-payload", string(result.Event))
 	}
+	if result.EventName != "asset-updated" {
+		t.Fatalf("event name = %q, want asset-updated", result.EventName)
+	}
 	if got := string(state.writes["asset2"]); got != "value2" {
 		t.Fatalf("asset2 write = %q, want value2", got)
 	}

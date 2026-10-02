@@ -18,6 +18,7 @@ import (
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-common/protoutil"
+	bfabx "github.com/hyperledger/fabric-x-sdk/blocks/fabricx"
 	"github.com/hyperledger/fabric-x-sdk/network"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -160,7 +161,7 @@ func dumpEnvelope(i int, envBytes []byte) {
 	case common.HeaderType_ENDORSER_TRANSACTION:
 		dumpEndorserTx(payload.Data)
 	case common.HeaderType_MESSAGE:
-		dumpFabricXTx(payload.Data)
+		dumpFabricXTx(payload.Data, chdr.TxId)
 	default:
 		fmt.Println("    data: unsupported/opaque payload type")
 	}
@@ -202,7 +203,7 @@ func dumpEndorserTx(data []byte) {
 	fmt.Printf("    data: peer.Transaction actions=%d\n", len(tx.Actions))
 }
 
-func dumpFabricXTx(data []byte) {
+func dumpFabricXTx(data []byte, txID string) {
 	var tx applicationpb.Tx
 	if err := proto.Unmarshal(data, &tx); err != nil {
 		fmt.Printf("    data: applicationpb.Tx decode failed: %v\n", err)
@@ -232,7 +233,18 @@ func dumpFabricXTx(data []byte) {
 			)
 		}
 	}
-	if len(tx.Metadata) > 1 && len(tx.Metadata[1]) > 0 {
+	if metadata := bfabx.DecodeMetadata(tx.Metadata); len(metadata.Event) > 0 || metadata.EventName != "" {
+		chaincodeID := ""
+		if len(tx.Namespaces) > 0 {
+			chaincodeID = tx.Namespaces[0].NsId
+		}
+		fmt.Printf("      event chaincode_id=%s tx_id=%s name=%s payload=%s\n",
+			chaincodeID,
+			txID,
+			metadata.EventName,
+			renderBytes(metadata.Event),
+		)
+	} else if len(tx.Metadata) > 1 && len(tx.Metadata[1]) > 0 {
 		var event peer.ChaincodeEvent
 		if err := proto.Unmarshal(tx.Metadata[1], &event); err != nil {
 			fmt.Printf("      event decode failed: %v\n", err)

@@ -12,6 +12,7 @@ import (
 	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"github.com/hyperledger/fabric-x-sdk/network"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -98,12 +99,27 @@ func (c *OrchestratorContact) EndorseOnly(ctx context.Context, req InvocationReq
 		GRPCNamespaceMetadata, req.Namespace,
 		GRPCInitMetadata, fmt.Sprintf("%t", req.IsInit),
 	)
-	resp, err := c.peer.ProcessProposal(ctx, prop)
+	var header metadata.MD
+	var trailer metadata.MD
+	resp, err := peer.NewEndorserClient(c.peer.Connection()).ProcessProposal(ctx, prop, grpc.Header(&header), grpc.Trailer(&trailer))
 	if err != nil {
 		return helperExecutionResult{}, fmt.Errorf("remote orchestrator %s endorsement: %w", c.MSPID(), err)
 	}
 	if resp == nil || resp.Response == nil {
 		return helperExecutionResult{}, fmt.Errorf("remote orchestrator %s returned no proposal response", c.MSPID())
+	}
+	binding, err := lifecycleBindingFromMetadata(header)
+	if err != nil {
+		c.logger.Warnf("remote orchestrator msp=%s lifecycle binding metadata ignored: %s", c.MSPID(), err)
+	}
+	if binding == nil {
+		binding, err = lifecycleBindingFromMetadata(trailer)
+		if err != nil {
+			c.logger.Warnf("remote orchestrator msp=%s lifecycle binding trailer ignored: %s", c.MSPID(), err)
+		}
+	}
+	if binding != nil && binding.MSPID == "" {
+		binding.MSPID = c.MSPID()
 	}
 	c.logger.Infof("tx=%s remote orchestrator msp=%s response status=%d tx_payload_bytes=%d endorsement_present=%t",
 		txID, c.MSPID(), resp.Response.Status, len(resp.Payload), resp.Endorsement != nil)
@@ -115,6 +131,7 @@ func (c *OrchestratorContact) EndorseOnly(ctx context.Context, req InvocationReq
 		},
 		TxID:     txID,
 		Response: resp.Response,
+		Binding:  binding,
 	}, nil
 }
 

@@ -52,6 +52,7 @@ type Result struct {
 	Message   string
 	Payload   []byte
 	Event     []byte
+	EventName string
 	QueryView *committerpb.View
 }
 

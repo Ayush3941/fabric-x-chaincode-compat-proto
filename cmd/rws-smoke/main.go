@@ -63,13 +63,16 @@ func main() {
 		})
 	}
 
-	signedProp, err := network.NewSignedProposal(signer, *channel, *namespace, *nsVersion, [][]byte{[]byte("invoke"), []byte(*key)})
-	must(err, "create signed proposal")
+	inv, err := efabx.NewInvocationBuilder(signer).NewInvocation(
+		*channel,
+		*namespace,
+		*nsVersion,
+		0,
+		[][]byte{[]byte("invoke"), []byte(*key)},
+	)
+	must(err, "create invocation")
 
-	inv, err := endorsement.Parse(signedProp, time.Time{})
-	must(err, "parse signed proposal")
-
-	result := endorsement.Success(rws, nil, []byte("rws-smoke"))
+	result := endorsement.Success(rws, "", nil, []byte("rws-smoke"))
 	resp, err := efabx.NewEndorsementBuilder(signer).Endorse(inv, result)
 	must(err, "endorse Fabric-X RW set")
 

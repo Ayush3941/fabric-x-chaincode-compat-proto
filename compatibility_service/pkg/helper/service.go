@@ -17,6 +17,7 @@ import (
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
 	"github.com/hyperledger/fabric-x-sdk/endorsement"
+	efab "github.com/hyperledger/fabric-x-sdk/endorsement/fabric"
 	efabx "github.com/hyperledger/fabric-x-sdk/endorsement/fabricx"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
@@ -343,7 +344,7 @@ func (s *Service) Close() error {
 
 // ProcessProposal is the Fabric peer-style API for incoming requests.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
-	inv, err := endorsement.Parse(prop, time.Now())
+	inv, err := efab.Parse(prop, time.Now())
 	if err != nil {
 		s.logger.Infof("tx=%s err=%s", inv.TxID, err)
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -353,21 +354,21 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("channel must be %s", s.channel))
 	}
 
-	executor, ok := s.executors[inv.CCID.Name]
+	executor, ok := s.executors[inv.Namespace]
 	if !ok {
 		executor, ok = s.executors["*"]
 	}
 	if !ok {
-		s.logger.Infof("tx=%s err=unknown namespace: %s", inv.TxID, inv.CCID.Name)
-		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("unknown namespace: %s", inv.CCID.Name))
+		s.logger.Infof("tx=%s err=unknown namespace: %s", inv.TxID, inv.Namespace)
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("unknown namespace: %s", inv.Namespace))
 	}
-	if inv.CCID.Version == "" {
-		inv.CCID.Version = "1.0"
+	if inv.ChaincodeVersion == "" {
+		inv.ChaincodeVersion = "1.0"
 	}
 
 	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
-		inv.TxID, inv.Channel, inv.CCID.Name, inv.CCID.Version, argString(inv.Args, 0), len(inv.Args)-1)
-	execCtx := NewExecutionContext(s.stateReader, inv.CCID.Name)
+		inv.TxID, inv.Channel, inv.Namespace, inv.ChaincodeVersion, argString(inv.Args, 0), len(inv.Args)-1)
+	execCtx := NewExecutionContext(s.stateReader, inv.Namespace)
 	proposal := clientProposalFromContext(ctx)
 	creator := proposal.Creator
 	if len(creator) == 0 {
@@ -401,7 +402,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		inv.TxID, res.Status, len(rws.Reads), len(rws.Writes), len(res.Payload), len(res.Event))
 
 	s.logger.Infof("tx=%s building Fabric-X endorsement namespace=%s reads=%d writes=%d event_bytes=%d",
-		inv.TxID, inv.CCID.Name, len(rws.Reads), len(rws.Writes), len(res.Event))
+		inv.TxID, inv.Namespace, len(rws.Reads), len(rws.Writes), len(res.Event))
 	end, err := s.builder.Endorse(inv, res)
 	if err != nil {
 		s.logger.Warnf("tx=%s endorsement build failed: %s", inv.TxID, err)
@@ -417,7 +418,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s Fabric-X endorsement built status=%d namespace=%s fn=%s args=%d tx_payload=%s endorsement_present=%t",
 		inv.TxID,
 		end.Response.Status,
-		inv.CCID.Name,
+		inv.Namespace,
 		string(inv.Args[0]),
 		len(inv.Args)-1,
 		payload,

@@ -85,6 +85,7 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 				Message:   string(msg.Payload),
 				Payload:   append([]byte(nil), msg.Payload...),
 				Event:     eventPayload(msg.ChaincodeEvent),
+				EventName: eventName(msg.ChaincodeEvent),
 				QueryView: h.state.QueryView(),
 			}, nil
 		default:
@@ -235,13 +236,14 @@ func (h *messageHandler) completedResult(msg *peer.ChaincodeMessage) (Result, er
 		return Result{}, fmt.Errorf("unmarshal COMPLETED response: %w", err)
 	}
 
-	h.logger.Infof("tx=%s shim COMPLETED status=%d payload_bytes=%d event_bytes=%d",
-		h.inv.TxID, response.Status, len(response.Payload), len(eventPayload(msg.ChaincodeEvent)))
+	h.logger.Infof("tx=%s shim COMPLETED status=%d payload_bytes=%d event_name=%s event_bytes=%d",
+		h.inv.TxID, response.Status, len(response.Payload), eventName(msg.ChaincodeEvent), len(eventPayload(msg.ChaincodeEvent)))
 	return Result{
 		Status:    response.Status,
 		Message:   response.Message,
 		Payload:   append([]byte(nil), response.Payload...),
 		Event:     eventPayload(msg.ChaincodeEvent),
+		EventName: eventName(msg.ChaincodeEvent),
 		QueryView: h.state.QueryView(),
 	}, nil
 }
@@ -269,6 +271,13 @@ func eventPayload(event *peer.ChaincodeEvent) []byte {
 		return nil
 	}
 	return append([]byte(nil), event.Payload...)
+}
+
+func eventName(event *peer.ChaincodeEvent) string {
+	if event == nil {
+		return ""
+	}
+	return event.EventName
 }
 
 func firstArg(args [][]byte) string {

@@ -26,11 +26,12 @@ import (
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
+	bfabx "github.com/hyperledger/fabric-x-sdk/blocks/fabricx"
 	"github.com/hyperledger/fabric-x-sdk/endorsement"
+	efab "github.com/hyperledger/fabric-x-sdk/endorsement/fabric"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"github.com/hyperledger/fabric-x-sdk/network"
 	nfab "github.com/hyperledger/fabric-x-sdk/network/fabric"
-	nfabx "github.com/hyperledger/fabric-x-sdk/network/fabricx"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
@@ -117,18 +118,19 @@ type InvocationRequest struct {
 
 // InvocationResponse is returned by query and invoke.
 type InvocationResponse struct {
-	TxID             string          `json:"tx_id,omitempty"`
-	Status           int32           `json:"status"`
-	Message          string          `json:"message,omitempty"`
-	Payload          string          `json:"payload,omitempty"`
-	PayloadBase64    string          `json:"payload_base64,omitempty"`
-	Submitted        bool            `json:"submitted"`
-	CommitStatus     string          `json:"commit_status,omitempty"`
-	BlockNum         uint64          `json:"block_num,omitempty"`
-	TxNum            uint32          `json:"tx_num,omitempty"`
-	IdempotencyKey   string          `json:"idempotency_key,omitempty"`
-	IdempotentReplay bool            `json:"idempotent_replay,omitempty"`
-	ChaincodeEvent   *ChaincodeEvent `json:"chaincode_event,omitempty"`
+	TxID              string                      `json:"tx_id,omitempty"`
+	Status            int32                       `json:"status"`
+	Message           string                      `json:"message,omitempty"`
+	Payload           string                      `json:"payload,omitempty"`
+	PayloadBase64     string                      `json:"payload_base64,omitempty"`
+	Submitted         bool                        `json:"submitted"`
+	CommitStatus      string                      `json:"commit_status,omitempty"`
+	BlockNum          uint64                      `json:"block_num,omitempty"`
+	TxNum             uint32                      `json:"tx_num,omitempty"`
+	IdempotencyKey    string                      `json:"idempotency_key,omitempty"`
+	IdempotentReplay  bool                        `json:"idempotent_replay,omitempty"`
+	ChaincodeEvent    *ChaincodeEvent             `json:"chaincode_event,omitempty"`
+	LifecycleBindings []LifecycleExecutionBinding `json:"lifecycle_bindings,omitempty"`
 }
 
 // ChaincodeEvent is the client-facing committed event shape.
@@ -148,7 +150,7 @@ type Service struct {
 	queryPeer    *network.Peer
 	queryService committerpb.QueryServiceClient
 	policies     *namespacePolicyResolver
-	submitter    *network.FabricSubmitter
+	submitter    *network.Submitter
 	notifier     *network.Peer
 	notify       committerpb.NotifierClient
 	idempotency  *idempotencyStore
@@ -234,12 +236,12 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	}
 
 	ordererConfs := []network.OrdererConf{cfg.Orderer.ToOrdererConf()}
-	var submitter *network.FabricSubmitter
+	var submitter *network.Submitter
 	switch cfg.Protocol {
 	case "fabric":
 		submitter, err = nfab.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
 	case "fabric-x", "":
-		submitter, err = nfabx.NewSubmitter(ctx, ordererConfs, signer, cfg.WaitAfterSubmit, orchestratorLogger)
+		submitter, err = network.NewSubmitter(ctx, ordererConfs, compatFabricXTxPackager{}, cfg.WaitAfterSubmit, orchestratorLogger)
 	default:
 		helper.Close()         //nolint:errcheck
 		lifecycleStore.Close() //nolint:errcheck
@@ -426,7 +428,7 @@ func (s *Service) RemotePeers(ctx context.Context, req lifecycle.RemotePeerReque
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
-	inv, err := endorsement.Parse(prop, time.Now())
+	inv, err := efab.Parse(prop, time.Now())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -461,7 +463,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Debugf("tx=%s request deadline started timeout=%s", inv.TxID, requestTimeout)
 
 	if operation == GRPCOperationEndorse {
-		resp, err := s.EndorseOnly(requestCtx, req)
+		result, err := s.EndorseOnly(requestCtx, req)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				s.logger.Warnf("tx=%s request deadline exceeded timeout=%s", inv.TxID, requestTimeout)
@@ -471,7 +473,13 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 			}
 			return nil, status.Error(codes.Internal, err.Error())
 		}
-		return resp, nil
+		if err := setLifecycleBindingMetadata(ctx, result.Binding); err != nil {
+			s.logger.Warnf("tx=%s lifecycle binding metadata failed: %s", result.TxID, err)
+		}
+		if len(result.Endorsement.Responses) == 0 || result.Endorsement.Responses[0] == nil {
+			return nil, status.Error(codes.Internal, "helper returned no proposal response")
+		}
+		return result.Endorsement.Responses[0], nil
 	}
 
 	res, err := s.Execute(requestCtx, req, submit)
@@ -502,25 +510,25 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 }
 
 // EndorseOnly executes the local helper path and returns the helper's Fabric-X
-// endorsement response without submitting to the orderer.
-func (s *Service) EndorseOnly(ctx context.Context, req InvocationRequest) (*peer.ProposalResponse, error) {
+// endorsement result without submitting to the orderer.
+func (s *Service) EndorseOnly(ctx context.Context, req InvocationRequest) (helperExecutionResult, error) {
 	namespace, args, err := s.prepareInvocation(req)
 	if err != nil {
-		return nil, err
+		return helperExecutionResult{}, err
 	}
 	if _, err := s.validateInitState(ctx, req, namespace, GRPCOperationEndorse); err != nil {
-		return nil, err
+		return helperExecutionResult{}, err
 	}
 	result, err := s.executeFresh(ctx, req, namespace, args)
 	if err != nil {
-		return nil, fmt.Errorf("helper endorsement failed: %w", err)
+		return helperExecutionResult{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
 	if len(result.Endorsement.Responses) == 0 || result.Endorsement.Responses[0] == nil {
-		return nil, errors.New("helper returned no proposal response")
+		return helperExecutionResult{}, errors.New("helper returned no proposal response")
 	}
 	s.logger.Infof("tx=%s execute-only endorsement completed namespace=%s status=%d",
 		result.TxID, namespace, result.Response.Status)
-	return result.Endorsement.Responses[0], nil
+	return result, nil
 }
 
 // Execute runs one query or invoke through helper endorsement
@@ -570,6 +578,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	resp := localResult.Response
 	out = responseFromPeer(localResult.TxID, resp)
 	out.IdempotencyKey = req.IdempotencyKey
+	out.LifecycleBindings = lifecycleBindings(localResult, nil)
 	s.logger.Infof("tx=%s helper response status=%d payload_bytes=%d submit=%t",
 		localResult.TxID, resp.Status, len(resp.Payload), submit)
 	if resp.Status < 200 || resp.Status >= 400 {
@@ -585,6 +594,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 	if err != nil {
 		return out, err
 	}
+	out.LifecycleBindings = lifecycleBindings(localResult, remoteResults)
 	if err := compareCanonicalResults(localResult, remoteResults); err != nil {
 		return out, err
 	}
@@ -657,7 +667,7 @@ func (s *Service) executeHelper(ctx context.Context, namespace, nsVersion string
 
 func (s *Service) helperProposal(namespace, nsVersion string, args [][]byte, transient map[string][]byte, clientProposal helper.ClientProposalContext) (*peer.SignedProposal, error) {
 	if len(clientProposal.Creator) == 0 || len(clientProposal.Nonce) == 0 {
-		prop, err := network.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, nsVersion, args)
+		prop, err := nfab.NewSignedProposal(s.signer, s.cfg.ChannelID, namespace, args)
 		if err != nil {
 			return nil, fmt.Errorf("create helper proposal: %w", err)
 		}
@@ -859,11 +869,9 @@ func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) 
 	}
 
 	req := InvocationRequest{
-		Function: string(inv.Args[0]),
-	}
-	if inv.CCID != nil {
-		req.ChaincodeName = inv.CCID.Name
-		req.ChaincodeVersion = inv.CCID.Version
+		Function:         string(inv.Args[0]),
+		ChaincodeName:    inv.Namespace,
+		ChaincodeVersion: inv.ChaincodeVersion,
 	}
 	if inv.Proposal != nil {
 		cpp, err := protoutil.UnmarshalChaincodeProposalPayload(inv.Proposal.Payload)
@@ -897,23 +905,20 @@ func eventFromEndorsement(end sdk.Endorsement, txID string) *ChaincodeEvent {
 	if err := proto.Unmarshal(end.Responses[0].Payload, &tx); err != nil {
 		return nil
 	}
-	if len(tx.Metadata) <= 1 || len(tx.Metadata[1]) == 0 {
+	metadata := bfabx.DecodeMetadata(tx.Metadata)
+	if len(metadata.Event) == 0 && metadata.EventName == "" {
 		return nil
 	}
-
-	event := &peer.ChaincodeEvent{}
-	if err := proto.Unmarshal(tx.Metadata[1], event); err != nil {
-		return nil
-	}
-	if event.TxId == "" {
-		event.TxId = txID
+	chaincodeID := ""
+	if len(tx.Namespaces) > 0 {
+		chaincodeID = tx.Namespaces[0].NsId
 	}
 	return &ChaincodeEvent{
-		ChaincodeID:   event.ChaincodeId,
-		TxID:          event.TxId,
-		EventName:     event.EventName,
-		Payload:       string(event.Payload),
-		PayloadBase64: base64.StdEncoding.EncodeToString(event.Payload),
+		ChaincodeID:   chaincodeID,
+		TxID:          txID,
+		EventName:     metadata.EventName,
+		Payload:       string(metadata.Event),
+		PayloadBase64: base64.StdEncoding.EncodeToString(metadata.Event),
 	}
 }
 
