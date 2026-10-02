@@ -5,8 +5,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
+	"strconv"
 
 	"compatibility_service/pkg/config"
 	"compatibility_service/pkg/lifecycle"
@@ -28,6 +30,7 @@ func NewCommand() *cobra.Command {
 		Short: "Manage compatibility-layer chaincode lifecycle",
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to lifecycle client configuration file")
+	cmd.PersistentFlags().String("host", "", "Target orchestrator host:port")
 	cmd.AddCommand(newPackageCommand())
 	cmd.AddCommand(newInstallCommand())
 	cmd.AddCommand(newQueryInstalledCommand())
@@ -323,10 +326,36 @@ func loadClientConfig(cmd *cobra.Command) (clientConfig, error) {
 	if cfg.Identity == nil {
 		return clientConfig{}, fmt.Errorf("identity is required")
 	}
+	host, _ := cmd.Flags().GetString("host")
+	if host != "" {
+		endpoint, err := parseHostEndpoint(host)
+		if err != nil {
+			return clientConfig{}, err
+		}
+		if cfg.Orchestrator == nil {
+			cfg.Orchestrator = &config.ClientConfig{}
+		}
+		cfg.Orchestrator.Endpoint = endpoint
+	}
 	if cfg.Orchestrator == nil || cfg.Orchestrator.Endpoint == nil {
-		return clientConfig{}, fmt.Errorf("orchestrator.endpoint is required")
+		return clientConfig{}, fmt.Errorf("host is required")
 	}
 	return cfg, nil
+}
+
+func parseHostEndpoint(value string) (*config.Endpoint, error) {
+	host, portValue, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid host %q: expected host:port", value)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		return nil, fmt.Errorf("invalid host %q: port must be numeric", value)
+	}
+	if host == "" || port <= 0 {
+		return nil, fmt.Errorf("invalid host %q: expected host:port", value)
+	}
+	return &config.Endpoint{Host: host, Port: port}, nil
 }
 
 func printPackage(w io.Writer, pkg lifecycle.InstalledPackage) {

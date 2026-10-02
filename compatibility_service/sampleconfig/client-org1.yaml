@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+
+channel-id: channelqc4
+protocol: fabric-x
+
+identity:
+  msp-id: org-1
+  msp-dir: ../artifacts/peerOrganizations/peer-org-1/users/client@peer-org-1/msp
+
+orchestrator:
+  endpoint:
+    host: 127.0.0.1
+    port: 9202
+  tls:
+    mode: mtls
+    cert-path: ../artifacts/peerOrganizations/peer-org-1/users/client@peer-org-1/tls/client.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-1/users/client@peer-org-1/tls/client.key
+    ca-cert-paths:
+      - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem

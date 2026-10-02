@@ -11,8 +11,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"compatibility_service/pkg/config"
@@ -67,6 +69,7 @@ func main() {
 	cmd.PersistentFlags().String("namespace", "", "Fabric-X namespace to invoke")
 	cmd.PersistentFlags().StringP("name", "n", "", "Lifecycle chaincode name")
 	cmd.PersistentFlags().StringP("version", "v", "1.0", "Lifecycle chaincode version")
+	cmd.PersistentFlags().String("host", "", "Target orchestrator host:port")
 	cmd.MarkPersistentFlagRequired("config")
 	cmd.MarkPersistentFlagRequired("namespace")
 	cmd.MarkPersistentFlagRequired("name")
@@ -181,10 +184,35 @@ func loadConfig(cmd *cobra.Command) (Config, error) {
 	if err := parser.EnhancedExactUnmarshal(&cfg); err != nil {
 		return Config{}, fmt.Errorf("invalid config: %w", err)
 	}
+	if host, _ := cmd.Flags().GetString("host"); host != "" {
+		endpoint, err := parseHostEndpoint(host)
+		if err != nil {
+			return Config{}, err
+		}
+		if cfg.Orchestrator == nil {
+			cfg.Orchestrator = &config.ClientConfig{}
+		}
+		cfg.Orchestrator.Endpoint = endpoint
+	}
 	if err := validate(cfg); err != nil {
 		return Config{}, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
+}
+
+func parseHostEndpoint(value string) (*config.Endpoint, error) {
+	host, portValue, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid host %q: expected host:port", value)
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil {
+		return nil, fmt.Errorf("invalid host %q: port must be numeric", value)
+	}
+	if host == "" || port <= 0 {
+		return nil, fmt.Errorf("invalid host %q: expected host:port", value)
+	}
+	return &config.Endpoint{Host: host, Port: port}, nil
 }
 
 func parseTxArgs(txJSON string) (txInput, [][]byte, map[string][]byte, error) {

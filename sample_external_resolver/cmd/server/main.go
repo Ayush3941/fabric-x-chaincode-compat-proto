@@ -18,15 +18,15 @@ import (
 )
 
 type server struct {
-	name                    string
-	version                 string
-	sequence                int64
-	org0Address             string
-	org0PackageID           string
-	org1Address             string
-	org1PackageID           string
-	org0OrchestratorAddress string
-	org1OrchestratorAddress string
+	name                      string
+	version                   string
+	sequence                  int64
+	org0Address               string
+	org0PackageID             string
+	org1Address               string
+	org1PackageID             string
+	org0OrchestratorAddresses []string
+	org1OrchestratorAddresses []string
 }
 
 func main() {
@@ -39,8 +39,8 @@ func main() {
 		org0Package = flag.String("org0-package-id", "", "org-0 local chaincode package ID")
 		org1Address = flag.String("org1-address", "127.0.0.1:10000", "org-1 CCAAS address")
 		org1Package = flag.String("org1-package-id", "", "org-1 local chaincode package ID")
-		org0Orch    = flag.String("org0-orchestrator", "127.0.0.1:9102", "org-0 orchestrator address")
-		org1Orch    = flag.String("org1-orchestrator", "127.0.0.1:9202", "org-1 orchestrator address")
+		org0Orch    = flag.String("org0-orchestrator", "127.0.0.1:9102", "comma-separated org-0 orchestrator addresses")
+		org1Orch    = flag.String("org1-orchestrator", "127.0.0.1:9202", "comma-separated org-1 orchestrator addresses")
 		tlsMode     = flag.String("tls-mode", "mtls", "TLS mode: tls or mtls")
 		tlsCert     = flag.String("tls-cert", "", "resolver server TLS certificate")
 		tlsKey      = flag.String("tls-key", "", "resolver server TLS private key")
@@ -62,15 +62,15 @@ func main() {
 	opts := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}
 	grpcServer := grpc.NewServer(opts...)
 	ccresolver.RegisterResolverServer(grpcServer, server{
-		name:                    *name,
-		version:                 *version,
-		sequence:                *sequence,
-		org0Address:             *org0Address,
-		org0PackageID:           *org0Package,
-		org1Address:             *org1Address,
-		org1PackageID:           *org1Package,
-		org0OrchestratorAddress: *org0Orch,
-		org1OrchestratorAddress: *org1Orch,
+		name:                      *name,
+		version:                   *version,
+		sequence:                  *sequence,
+		org0Address:               *org0Address,
+		org0PackageID:             *org0Package,
+		org1Address:               *org1Address,
+		org1PackageID:             *org1Package,
+		org0OrchestratorAddresses: splitCSV(*org0Orch),
+		org1OrchestratorAddresses: splitCSV(*org1Orch),
 	})
 
 	fmt.Fprintf(os.Stderr, "resolver gRPC listening on %s tls=%s\n", *listen, *tlsMode)
@@ -127,19 +127,32 @@ func (s server) resolveRemoteOrchestrator(req *ccresolver.ResolveRequest) *ccres
 	if targetMSP == "" {
 		targetMSP = req.MSPID
 	}
-	address := ""
+	var addresses []string
 	switch targetMSP {
 	case "org-0":
-		address = s.org0OrchestratorAddress
+		addresses = s.org0OrchestratorAddresses
 	case "org-1":
-		address = s.org1OrchestratorAddress
+		addresses = s.org1OrchestratorAddresses
 	default:
 		return &ccresolver.ResolveResponse{}
 	}
+	candidates := make([]ccresolver.ResolveCandidate, 0, len(addresses))
+	for i, address := range addresses {
+		candidates = append(candidates, ccresolver.ResolveCandidate{
+			MSPID:      targetMSP,
+			InstanceID: fmt.Sprintf("%s-%d", targetMSP, i+1),
+			Address:    address,
+			TLSMode:    "mtls",
+		})
+	}
+	if len(candidates) == 0 {
+		return &ccresolver.ResolveResponse{}
+	}
 	return &ccresolver.ResolveResponse{
-		Found:   true,
-		Address: address,
-		TLSMode: "mtls",
+		Found:      true,
+		Address:    candidates[0].Address,
+		TLSMode:    candidates[0].TLSMode,
+		Candidates: candidates,
 	}
 }
 

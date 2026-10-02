@@ -50,7 +50,7 @@ type remoteOrchestratorResolveRequest struct {
 
 type remoteOrchestratorResolver interface {
 	AvailableMSPs() map[string]struct{}
-	Resolve(context.Context, remoteOrchestratorResolveRequest) (*OrchestratorContact, bool, error)
+	Resolve(context.Context, remoteOrchestratorResolveRequest) ([]*OrchestratorContact, bool, error)
 	RemotePeers(context.Context, remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error)
 	Close() error
 }
@@ -107,11 +107,11 @@ func (r *remoteOrchestratorResolvers) AvailableMSPs() map[string]struct{} {
 	return out
 }
 
-func (r *remoteOrchestratorResolvers) Resolve(ctx context.Context, req remoteOrchestratorResolveRequest) (*OrchestratorContact, bool, error) {
+func (r *remoteOrchestratorResolvers) Resolve(ctx context.Context, req remoteOrchestratorResolveRequest) ([]*OrchestratorContact, bool, error) {
 	if r.static != nil {
-		contact, ok, err := r.static.Resolve(ctx, req)
+		contacts, ok, err := r.static.Resolve(ctx, req)
 		if err != nil || ok {
-			return contact, ok, err
+			return contacts, ok, err
 		}
 	}
 	if r.dynamic != nil {
@@ -162,11 +162,11 @@ func (r *remoteOrchestratorResolvers) Close() error {
 }
 
 type staticRemoteOrchestratorResolver struct {
-	contacts map[string]*OrchestratorContact
+	contacts map[string][]*OrchestratorContact
 }
 
 func newStaticRemoteOrchestratorResolver(configs []RemoteOrchestratorConfig, logger sdk.Logger) (*staticRemoteOrchestratorResolver, error) {
-	contacts, err := newOrchestratorContacts(configs, logger)
+	contacts, err := newOrchestratorContactCandidates(configs, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -181,17 +181,20 @@ func (r *staticRemoteOrchestratorResolver) AvailableMSPs() map[string]struct{} {
 	return out
 }
 
-func (r *staticRemoteOrchestratorResolver) Resolve(_ context.Context, req remoteOrchestratorResolveRequest) (*OrchestratorContact, bool, error) {
-	contact, ok := r.contacts[req.TargetMSPID]
-	return contact, ok, nil
+func (r *staticRemoteOrchestratorResolver) Resolve(_ context.Context, req remoteOrchestratorResolveRequest) ([]*OrchestratorContact, bool, error) {
+	contacts, ok := r.contacts[req.TargetMSPID]
+	if !ok || len(contacts) == 0 {
+		return nil, false, nil
+	}
+	return append([]*OrchestratorContact(nil), contacts...), true, nil
 }
 
 func (r *staticRemoteOrchestratorResolver) RemotePeers(context.Context, remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error) {
-	return lifecycleRemotes(r.contacts), nil
+	return lifecycleRemoteCandidates(r.contacts), nil
 }
 
 func (r *staticRemoteOrchestratorResolver) Close() error {
-	return closeOrchestratorContacts(r.contacts)
+	return closeOrchestratorContactCandidates(r.contacts)
 }
 
 type dynamicRemoteOrchestratorResolver struct {
@@ -253,12 +256,9 @@ func (r *dynamicRemoteOrchestratorResolver) AvailableMSPs() map[string]struct{} 
 	return out
 }
 
-func (r *dynamicRemoteOrchestratorResolver) Resolve(ctx context.Context, req remoteOrchestratorResolveRequest) (*OrchestratorContact, bool, error) {
+func (r *dynamicRemoteOrchestratorResolver) Resolve(ctx context.Context, req remoteOrchestratorResolveRequest) ([]*OrchestratorContact, bool, error) {
 	if !r.targetAllowed(req.TargetMSPID) {
 		return nil, false, nil
-	}
-	if contact := r.cached(req.TargetMSPID); contact != nil {
-		return contact, true, nil
 	}
 
 	resolveCtx, cancel := context.WithTimeout(ctx, r.timeout)
@@ -279,29 +279,25 @@ func (r *dynamicRemoteOrchestratorResolver) Resolve(ctx context.Context, req rem
 	if out == nil || !out.Found {
 		return nil, false, nil
 	}
-	endpoint, err := endpointFromAddress(out.Address)
-	if err != nil {
-		return nil, false, fmt.Errorf("dynamic remote orchestrator resolver response: %w", err)
-	}
-	contact, err := newOrchestratorContact(RemoteOrchestratorConfig{
-		MSPID:    req.TargetMSPID,
-		Endpoint: endpoint,
-		TLS:      r.contactTLS,
-	}, r.logger)
+	candidates, err := remoteOrchestratorCandidatesFromResponse(req.TargetMSPID, out)
 	if err != nil {
 		return nil, false, err
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if existing := r.contacts[req.TargetMSPID]; existing != nil {
-		contact.Close() //nolint:errcheck
-		return existing, true, nil
+	if len(candidates) == 0 {
+		return nil, false, nil
 	}
-	r.contacts[req.TargetMSPID] = contact
-	r.logger.Infof("remote orchestrator resolver dynamic grpc match requester_msp=%s target_msp=%s endpoint=%s resolver=%s",
-		req.RequesterMSPID, req.TargetMSPID, out.Address, r.resolverAddress)
-	return contact, true, nil
+
+	contacts := make([]*OrchestratorContact, 0, len(candidates))
+	for _, candidate := range candidates {
+		contact, err := r.contactForCandidate(req.TargetMSPID, candidate)
+		if err != nil {
+			return nil, false, err
+		}
+		contacts = append(contacts, contact)
+	}
+	r.logger.Infof("remote orchestrator resolver dynamic grpc match requester_msp=%s target_msp=%s candidates=%d resolver=%s",
+		req.RequesterMSPID, req.TargetMSPID, len(contacts), r.resolverAddress)
+	return contacts, true, nil
 }
 
 func (r *dynamicRemoteOrchestratorResolver) RemotePeers(ctx context.Context, req remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error) {
@@ -309,12 +305,12 @@ func (r *dynamicRemoteOrchestratorResolver) RemotePeers(ctx context.Context, req
 	for _, mspID := range r.targetMSPIDs {
 		targetReq := req
 		targetReq.TargetMSPID = mspID
-		contact, ok, err := r.Resolve(ctx, targetReq)
+		contacts, ok, err := r.Resolve(ctx, targetReq)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			peers = append(peers, contact)
+		if ok && len(contacts) > 0 {
+			peers = append(peers, contacts[0])
 		}
 	}
 	return peers, nil
@@ -331,12 +327,6 @@ func (r *dynamicRemoteOrchestratorResolver) Close() error {
 	return closeOrchestratorContacts(contacts)
 }
 
-func (r *dynamicRemoteOrchestratorResolver) cached(mspID string) *OrchestratorContact {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.contacts[mspID]
-}
-
 func (r *dynamicRemoteOrchestratorResolver) targetAllowed(mspID string) bool {
 	for _, candidate := range r.targetMSPIDs {
 		if candidate == mspID {
@@ -344,6 +334,67 @@ func (r *dynamicRemoteOrchestratorResolver) targetAllowed(mspID string) bool {
 		}
 	}
 	return false
+}
+
+func (r *dynamicRemoteOrchestratorResolver) contactForCandidate(targetMSPID string, candidate ccresolver.ResolveCandidate) (*OrchestratorContact, error) {
+	if candidate.Address == "" {
+		return nil, fmt.Errorf("dynamic remote orchestrator resolver response missing address for msp %s", targetMSPID)
+	}
+	if candidate.MSPID != "" && candidate.MSPID != targetMSPID {
+		return nil, fmt.Errorf("dynamic remote orchestrator resolver returned msp %s for requested msp %s", candidate.MSPID, targetMSPID)
+	}
+	endpoint, err := endpointFromAddress(candidate.Address)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic remote orchestrator resolver response: %w", err)
+	}
+
+	key := targetMSPID + "|" + candidate.Address
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing := r.contacts[key]; existing != nil {
+		return existing, nil
+	}
+
+	contact, err := newOrchestratorContact(RemoteOrchestratorConfig{
+		MSPID:    targetMSPID,
+		Endpoint: endpoint,
+		TLS:      r.contactTLS,
+	}, r.logger)
+	if err != nil {
+		return nil, err
+	}
+	r.contacts[key] = contact
+	r.logger.Infof("remote orchestrator dynamic contact cached target_msp=%s endpoint=%s resolver=%s",
+		targetMSPID, candidate.Address, r.resolverAddress)
+	return contact, nil
+}
+
+func remoteOrchestratorCandidatesFromResponse(targetMSPID string, out *ccresolver.ResolveResponse) ([]ccresolver.ResolveCandidate, error) {
+	if out == nil {
+		return nil, nil
+	}
+	if len(out.Candidates) == 0 {
+		if out.Address == "" {
+			return nil, nil
+		}
+		return []ccresolver.ResolveCandidate{{
+			MSPID:   targetMSPID,
+			Address: out.Address,
+			TLSMode: out.TLSMode,
+		}}, nil
+	}
+
+	candidates := make([]ccresolver.ResolveCandidate, 0, len(out.Candidates))
+	for i, candidate := range out.Candidates {
+		if candidate.Address == "" {
+			return nil, fmt.Errorf("dynamic remote orchestrator resolver candidate %d missing address", i)
+		}
+		if candidate.MSPID != "" && candidate.MSPID != targetMSPID {
+			return nil, fmt.Errorf("dynamic remote orchestrator resolver candidate %d msp=%s, want %s", i, candidate.MSPID, targetMSPID)
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
 }
 
 func endpointFromAddress(address string) (*config.Endpoint, error) {

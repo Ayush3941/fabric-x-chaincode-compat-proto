@@ -44,6 +44,19 @@ func newOrchestratorContacts(configs []RemoteOrchestratorConfig, logger sdk.Logg
 	return contacts, nil
 }
 
+func newOrchestratorContactCandidates(configs []RemoteOrchestratorConfig, logger sdk.Logger) (map[string][]*OrchestratorContact, error) {
+	contacts := make(map[string][]*OrchestratorContact, len(configs))
+	for _, cfg := range configs {
+		contact, err := newOrchestratorContact(cfg, logger)
+		if err != nil {
+			closeOrchestratorContactCandidates(contacts) //nolint:errcheck
+			return nil, err
+		}
+		contacts[contact.MSPID()] = append(contacts[contact.MSPID()], contact)
+	}
+	return contacts, nil
+}
+
 func newOrchestratorContact(cfg RemoteOrchestratorConfig, logger sdk.Logger) (*OrchestratorContact, error) {
 	remotePeer, err := network.NewPeer(cfg.ToPeerConf())
 	if err != nil {
@@ -191,10 +204,30 @@ func closeOrchestratorContacts(contacts map[string]*OrchestratorContact) error {
 	return errors.Join(errs...)
 }
 
+func closeOrchestratorContactCandidates(contacts map[string][]*OrchestratorContact) error {
+	var errs []error
+	for _, candidates := range contacts {
+		for _, contact := range candidates {
+			errs = append(errs, contact.Close())
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func lifecycleRemotes(contacts map[string]*OrchestratorContact) []lifecycle.RemotePeer {
 	remotes := make([]lifecycle.RemotePeer, 0, len(contacts))
 	for _, contact := range contacts {
 		remotes = append(remotes, contact)
+	}
+	return remotes
+}
+
+func lifecycleRemoteCandidates(contacts map[string][]*OrchestratorContact) []lifecycle.RemotePeer {
+	remotes := make([]lifecycle.RemotePeer, 0, len(contacts))
+	for _, candidates := range contacts {
+		if len(candidates) > 0 {
+			remotes = append(remotes, candidates[0])
+		}
 	}
 	return remotes
 }

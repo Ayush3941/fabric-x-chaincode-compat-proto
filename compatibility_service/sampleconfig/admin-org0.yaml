@@ -5,9 +5,6 @@ identity:
   msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/msp
 
 orchestrator:
-  endpoint:
-    host: 127.0.0.1
-    port: 9102
   tls:
     mode: mtls
     cert-path: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/tls/client.crt

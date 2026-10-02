@@ -35,11 +35,20 @@ type ResolveRequest struct {
 }
 
 type ResolveResponse struct {
-	Found     bool   `json:"found"`
-	Address   string `json:"address,omitempty"`
-	TLSMode   string `json:"tls_mode,omitempty"`
-	PackageID string `json:"package_id,omitempty"`
-	Sequence  int64  `json:"sequence,omitempty"`
+	Found      bool               `json:"found"`
+	Address    string             `json:"address,omitempty"`
+	TLSMode    string             `json:"tls_mode,omitempty"`
+	PackageID  string             `json:"package_id,omitempty"`
+	Sequence   int64              `json:"sequence,omitempty"`
+	Candidates []ResolveCandidate `json:"candidates,omitempty"`
+}
+
+type ResolveCandidate struct {
+	MSPID      string            `json:"msp_id,omitempty"`
+	InstanceID string            `json:"instance_id,omitempty"`
+	Address    string            `json:"address,omitempty"`
+	TLSMode    string            `json:"tls_mode,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
 type ResolverServer interface {

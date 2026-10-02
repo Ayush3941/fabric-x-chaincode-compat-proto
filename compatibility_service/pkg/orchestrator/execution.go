@@ -94,7 +94,7 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 
 	results := make([]helperExecutionResult, 0, len(plan.remoteMSPs))
 	for _, mspID := range plan.remoteMSPs {
-		remote, ok, err := s.remotes.Resolve(ctx, remoteOrchestratorResolveRequest{
+		remotes, ok, err := s.remotes.Resolve(ctx, remoteOrchestratorResolveRequest{
 			RequesterMSPID:   localMSPID,
 			TargetMSPID:      mspID,
 			ChannelID:        s.cfg.ChannelID,
@@ -105,12 +105,26 @@ func (s *Service) requestRemoteOrchestratorsIfPolicyNeedsThem(
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if !ok || len(remotes) == 0 {
 			return nil, fmt.Errorf("remote orchestrator for msp %s is not configured", mspID)
 		}
-		result, err := remote.EndorseOnly(ctx, req)
-		if err != nil {
-			return nil, err
+		var (
+			result  helperExecutionResult
+			success bool
+			lastErr error
+		)
+		for _, remote := range remotes {
+			result, err = remote.EndorseOnly(ctx, req)
+			if err == nil {
+				success = true
+				break
+			}
+			lastErr = err
+			s.logger.Warnf("remote orchestrator candidate failed msp=%s endpoint=%s: %s",
+				remote.MSPID(), remote.Address(), err)
+		}
+		if !success {
+			return nil, fmt.Errorf("remote orchestrator for msp %s endorsement failed: %w", mspID, lastErr)
 		}
 		results = append(results, result)
 	}

@@ -25,16 +25,14 @@ inspected with `bin/block-dump`.
 - Lifecycle commit markers written as Fabric-X transactions
 - Committed lifecycle definitions load again after restart
 - CCAAS and remote orchestrator addresses can come from the sample resolver
+- Multiple orchestrator candidates per organization
 - `GetState`, `PutState`, `DelState`, read-your-writes
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
 - `GetTxID`, `GetChannelID`, `GetCreator`, `GetBinding`, `GetDecorations`
 - `GetSignedProposal`, `GetTransient`, `GetTxTimestamp`
 - `CreateCompositeKey`, `SplitCompositeKey`
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
-- One event payload through `SetEvent`
-
-Known limitation: Fabric-X SDK event metadata keeps the event payload, but the
-committed event name is currently the SDK default `log`.
+- One event through `SetEvent`
 
 ## Repository Layout
 
@@ -154,6 +152,7 @@ Useful ports:
 10000  org1 CCAAS
 9300   sample resolver
 9102   org0 orchestrator
+9103   optional second org0 orchestrator
 9202   org1 orchestrator
 4001   Notification Service / block query
 7001   Query Service
@@ -176,23 +175,23 @@ cd compatibility_service
 ### Install
 
 ```bash
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
-./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml
-./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
+./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102
+./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202
 ```
 
 ### Approve And Commit
 
 ```bash
-ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml | awk -F= '/^package_id=/{print $2; exit}')
-ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml | awk -F= '/^package_id=/{print $2; exit}')
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG"
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG"
-./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1
-./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml -n sample -v 1.0 --sequence 1
-./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml -n sample -v 1.0
-./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml -n sample -v 1.0
+ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=/{print $2; exit}')
+ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 | awk -F= '/^package_id=/{print $2; exit}')
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG"
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG"
+./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0
 ```
 
 Expected commit output includes:
@@ -243,12 +242,12 @@ Use `--init-required` to block normal invoke/query until one init transaction
 commits.
 
 ```bash
-ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml | awk -F= '/^package_id=/{print $2; exit}')
-ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml | awk -F= '/^package_id=/{print $2; exit}')
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0 --sequence 1 --package-id "$ORG0_PKG" --init-required
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
-./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0 --sequence 1 --init-required
-./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml -n sample-init -v 1.0 --sequence 1 --init-required
+ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=/{print $2; exit}')
+ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 | awk -F= '/^package_id=/{print $2; exit}')
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --package-id "$ORG0_PKG" --init-required
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
+./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
 ./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"compatv2","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
 ./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 '{"Function":"compatv2","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
 ```
@@ -356,6 +355,8 @@ Full cleanup:
 - Committed lifecycle definitions are written to Fabric-X ledger namespace `0`.
 - CCAAS and remote orchestrator endpoints are resolved lazily by static config
   or the sample resolver.
+- The sample resolver accepts comma-separated `-org0-orchestrator` and
+  `-org1-orchestrator` values and returns them as ordered candidates.
 - The sample resolver is not part of the compatibility service runtime; users
   can replace it with their own resolver implementation.
 - Current lifecycle identity is `name:version`; traditional Fabric treats
