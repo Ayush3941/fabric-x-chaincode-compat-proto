@@ -1,33 +1,124 @@
-# Fabric-X Chaincode Compatibility Service
+# Compatibility Service
 
-This folder contains the compatibility service binaries:
+This module contains the client CLI, orchestrator server, embedded helper path,
+shim bridge, lifecycle store, and resolver clients used by the repository-root
+demo.
 
-- `cmd/orchestrator`: serves the client-facing ProcessProposal API, lifecycle API, embedded helper path, remote endorsement calls, Fabric-X submit, and finality wait.
-- `cmd/client`: sends MSP-signed invoke/query proposals to the orchestrator.
-- `pkg/helper`: executes one chaincode proposal, owns the per-invocation execution context, reads committed state through Query Service, and builds Fabric-X endorsement material.
-- `pkg/shim`: speaks the Fabric chaincode-as-a-service shim protocol with the external chaincode process.
-- `pkg/lifecycle`: packages, installs, approves, commits, and resolves CCAAS connection metadata in the orchestrator's in-memory lifecycle store.
-- `pkg/orchestrator`: coordinates local helper execution, remote orchestrator execution, result matching, endorsement merge, orderer submit, and Notification Service finality.
+Use the root [README.md](../README.md) for the full end-to-end runbook.
 
-Use the repository-root [README.md](../README.md) for the full runnable flow.
-That guide starts the Fabric-X network, runs both org chaincode services, runs
-both orchestrators, installs lifecycle packages, commits the sample definition,
-invokes `compatv2`, verifies committed state, and dumps the generated block.
+## Binaries
 
-Current execution shape:
+```text
+cmd/client         sends MSP-signed invoke/query proposals to an orchestrator
+cmd/orchestrator   serves ProcessProposal and lifecycle APIs
+```
+
+Build:
+
+```bash
+go build -o bin/client ./cmd/client
+go build -o bin/orchestrator ./cmd/orchestrator
+```
+
+## Packages
+
+```text
+pkg/orchestrator   coordinates execution, lifecycle, policy, submit, finality
+pkg/helper         runs one chaincode execution and builds Fabric-X endorsement material
+pkg/shim           speaks Fabric CCAAS shim messages to the external chaincode
+pkg/lifecycle      package/install/approve/commit/query state and RPC service
+pkg/ccresolver     JSON-over-gRPC resolver API shared with sample resolvers
+pkg/config         YAML config structs and TLS/client helpers
+```
+
+## Execution Path
 
 ```text
 client CLI
--> org0 orchestrator
-   -> local helper -> org0 CCAAS
-   -> remote org1 orchestrator -> org1 helper -> org1 CCAAS
-   -> compare results
-   -> merge endorsements
-   -> submit to Fabric-X orderer
-   -> wait for Notification Service finality
+  -> orchestrator ProcessProposal
+  -> local helper
+  -> shim adapter
+  -> external chaincode service
+  -> Fabric-X endorsement material
+  -> remote orchestrators when namespace policy requires them
+  -> canonical result comparison
+  -> endorsement merge
+  -> Fabric-X orderer submit
+  -> Notification Service finality
 ```
 
-The lifecycle definition records chaincode `name`, `version`, `sequence`,
-`init_required`, `initialized`, and each org's local package mapping.
-Endorsement policy is not stored in lifecycle state; it is resolved from the
-Fabric-X namespace through Query Service during transaction execution.
+The helper does not write committed state directly. It reads committed values
+through the Fabric-X Query Service and records local read/write effects in the
+execution context. Those effects are converted into Fabric-X endorsement
+material after chaincode returns.
+
+## Lifecycle Model
+
+The lifecycle CLI is intentionally close to Fabric lifecycle commands:
+
+```text
+orchestrator lifecycle package
+orchestrator lifecycle install
+orchestrator lifecycle approveformyorg
+orchestrator lifecycle checkcommitreadiness
+orchestrator lifecycle commit
+orchestrator lifecycle queryinstalled
+orchestrator lifecycle querycommitted
+```
+
+Installed packages are org-local and in memory. Committed definitions are
+written as Fabric-X transactions in lifecycle namespace `0`, then reloaded by
+new orchestrators during startup.
+
+The current chaincode identity is:
+
+```text
+name:version
+```
+
+`sequence` is used as the lifecycle upgrade counter for that identity.
+
+## Resolver Model
+
+CCAAS and remote orchestrator endpoints can be configured statically or resolved
+lazily through the resolver API.
+
+Remote orchestrator resolution is MSP-based:
+
+```text
+namespace policy says: need org-0
+resolver returns: ordered org-0 orchestrator candidates
+orchestrator tries: first candidate, then fallback candidates
+```
+
+The resolver request includes `requester_msp_id`, `target_msp_id`, channel,
+namespace, chaincode name, version, and sequence. A user-owned resolver can use
+those fields for health checks, locality, routing, load preference, or failover.
+
+## Config Files
+
+```text
+sampleconfig/client.yaml          org0 client CLI config
+sampleconfig/client-org1.yaml     org1 client CLI config
+sampleconfig/orchestrator.yaml    org0 orchestrator on 127.0.0.1:9102
+sampleconfig/orchestrator0B.yaml  second org0 orchestrator on 127.0.0.1:9103
+sampleconfig/orchestrator1.yaml   org1 orchestrator on 127.0.0.1:9202
+sampleconfig/admin-org0.yaml      org0 lifecycle admin identity
+sampleconfig/admin-org1.yaml      org1 lifecycle admin identity
+```
+
+Admin configs intentionally do not pin an orchestrator endpoint. Pass the target
+with `--host`:
+
+```bash
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0
+```
+
+## Tests
+
+```bash
+go test ./pkg/lifecycle ./pkg/orchestrator ./pkg/shim
+go test -tags=e2e ./integration/e2e -count=1 -v
+```
+
+Run the e2e tests only after the Fabric-X network and sample services are up.

@@ -3,14 +3,16 @@
 This repository runs unchanged Go Fabric chaincode as an external chaincode
 service and commits the resulting state change through Fabric-X.
 
-The default demo uses two organizations:
+The default demo starts two application organizations, installs one chaincode
+definition, collects endorsements from both organizations, submits one Fabric-X
+transaction, waits for finality, and dumps the committed block.
 
 ```text
-client -> org0 orchestrator -> org0 CCAAS
-                         |
-                         -> org1 orchestrator -> org1 CCAAS
-                         |
-                         -> Fabric-X orderer -> committer -> finality
+client
+  -> org0 orchestrator -> org0 CCAAS
+  -> org1 orchestrator -> org1 CCAAS
+  -> merge matching endorsements
+  -> Fabric-X orderer -> committer -> finality
 ```
 
 Committed blocks are stored under `runtime/committer/ledger` and can be
@@ -20,30 +22,31 @@ inspected with `bin/block-dump`.
 
 - External Go chaincode through `shim.ChaincodeServer`
 - MSP namespace policies and Fabric-X threshold-rule namespace policies
-- Two-org endorsement collection for namespace `1`
+- Two-organization endorsement for namespace `1`
 - Lifecycle package, install, approve, readiness, commit, query, and init gate
 - Lifecycle commit markers written as Fabric-X transactions
-- Committed lifecycle definitions load again after restart
-- CCAAS and remote orchestrator addresses can come from the sample resolver
+- Committed lifecycle definitions reloaded from the ledger after restart
+- Static or resolver-based CCAAS endpoint lookup
+- Static or resolver-based remote orchestrator lookup
 - Multiple orchestrator candidates per organization
-- `GetState`, `PutState`, `DelState`, read-your-writes
+- `GetState`, `PutState`, `DelState`, and read-your-writes
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
 - `GetTxID`, `GetChannelID`, `GetCreator`, `GetBinding`, `GetDecorations`
 - `GetSignedProposal`, `GetTransient`, `GetTxTimestamp`
 - `CreateCompositeKey`, `SplitCompositeKey`
 - `shim.Success`, `shim.Error`, `shim.OK`, `shim.ERROR`
-- One event through `SetEvent`
+- Named chaincode event through `SetEvent`
 
-## Repository Layout
+## Layout
 
 ```text
-compatibility_service/       orchestrator, embedded helper path, client CLI
-sample_external_chaincode/   external Go chaincode service
+compatibility_service/       orchestrator, embedded helper path, lifecycle, client CLI
+sample_external_chaincode/   sample external Go chaincode service
 sample_external_resolver/    sample user-owned resolver service
 cmd/block-dump/              readable committed block dump
 cmd/rws-smoke/               low-level Fabric-X RW-set smoke client
-scripts/                     build, setup, start, stop helpers
-fxconfig/                    namespace setup configs
+scripts/                     build, setup, start, stop, reset helpers
+fxconfig/                    namespace setup configs for fxconfig
 networkconfig/               crypto and channel config inputs
 committerconfig/             Fabric-X committer configs
 ordererconfig/               Arma orderer configs
@@ -53,7 +56,7 @@ storage/                     Arma runtime storage, ignored
 bin/                         generated Fabric-X tools, ignored
 ```
 
-## Prerequisites
+## Requirements
 
 ```text
 docker
@@ -68,7 +71,7 @@ By default, `scripts/build-images.sh` clones pinned Fabric-X sources into
 `third_party/.build`. Set `USE_LOCAL_REPOS=1` only when using sibling local
 checkouts.
 
-## Set Up The Network
+## 1. Start Fabric-X
 
 Run from the repository root:
 
@@ -87,9 +90,9 @@ namespace 1: AND('org-0.member','org-1.member')
 namespace 2: threshold policy bound to the org0 client certificate
 ```
 
-If namespaces already exist, the script skips them.
+If the namespaces already exist, the script skips them.
 
-## Build Binaries
+## 2. Build Binaries
 
 Run from the repository root:
 
@@ -105,10 +108,10 @@ cd ..
 go build -o bin/block-dump ./cmd/block-dump
 ```
 
-## Start Services
+## 3. Start Services
 
-Use five service terminals and one client terminal.
-Run each terminal block from the repository root.
+Use five service terminals and one client terminal. Run each service block from
+the repository root.
 
 ### Terminal 1: org0 CCAAS
 
@@ -159,37 +162,29 @@ Useful ports:
 6022   Arma router
 ```
 
-## Run Lifecycle
+## 4. Package, Install, Approve, Commit
 
-Run from `compatibility_service` in Terminal 6.
-
-### Package
+Run from `compatibility_service` in Terminal 6:
 
 ```bash
 export FABRIC_LOGGING_SPEC=error
-cd compatibility_service
+cd /home/kali/Desktop/LFX/Project/compatibility_service
+
 ./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org0_sample --label org0_sample_1 --output ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
 ./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org1_sample --label org1_sample_1 --output ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
-```
 
-### Install
-
-```bash
 ./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
 ./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
-./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102
-./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202
-```
 
-### Approve And Commit
-
-```bash
 ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=/{print $2; exit}')
 ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 | awk -F= '/^package_id=/{print $2; exit}')
+
 ./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG"
 ./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG"
+
 ./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
 ./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
+
 ./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0
 ./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0
 ```
@@ -202,16 +197,16 @@ org-0=true
 org-1=true
 ```
 
-## Invoke Compatv2
+## 5. Invoke Compat-v3
 
-Run from `compatibility_service` in Terminal 6.
+Run from `compatibility_service` in Terminal 6:
 
 ```bash
 mkdir -p ../runtime/compatibility_service
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-multiorg-v2","value-multiorg-v2","asset-multiorg-v2-delete"]}' | tee ../runtime/compatibility_service/compatv2-result.json
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compat-v3","Args":["asset-multiorg-v3","value-multiorg-v3","asset-multiorg-v3-delete"]}' | tee ../runtime/compatibility_service/compatv3-result.json
 ```
 
-Expected client output is larger JSON. Check these fields:
+The client prints a larger JSON response. Check these fields:
 
 ```json
 {
@@ -219,24 +214,56 @@ Expected client output is larger JSON. Check these fields:
   "submitted": true,
   "commit_status": "COMMITTED",
   "chaincode_event": {
-    "event_name": "log"
+    "event_name": "compat-v3-event"
   }
 }
 ```
 
-With transient data:
+## 6. Query State
+
+Run from `compatibility_service`:
 
 ```bash
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-v2-transient","value-v2-transient","asset-v2-transient-delete"],"Transient":{"secret":"transient-value","purpose":"compatv2-test"}}'
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v3"]}'
 ```
 
-Against threshold namespace `2`:
+Expected:
+
+```text
+value-multiorg-v3
+```
+
+Run:
 
 ```bash
-./bin/client invoke -c sampleconfig/client.yaml --namespace 2 -n sample -v 1.0 '{"Function":"compatv2","Args":["asset-threshold-v2","value-threshold-v2","asset-threshold-v2-delete"]}' | tee ../runtime/compatibility_service/threshold-compatv2-result.json
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v3-delete"]}'
 ```
 
-## Init-Required Lifecycle
+Expected: empty output.
+
+## 7. Inspect The Block
+
+Run from the repository root:
+
+```bash
+txid=$(python3 -c 'import json; print(json.load(open("runtime/compatibility_service/compatv3-result.json"))["tx_id"])')
+./bin/block-dump -artifacts ./artifacts -txid "$txid"
+```
+
+Expected shape:
+
+```text
+Envelope type=MESSAGE/0 channel=channelqc4
+data: applicationpb.Tx namespaces=1 endorsements=1
+endorsements[0] signers=2
+signer[0] msp_id=org-0
+signer[1] msp_id=org-1
+event ... name=compat-v3-event
+read_write key="asset-multiorg-v3" value="value-multiorg-v3"
+read_write key="asset-multiorg-v3-delete" value=<nil>
+```
+
+## Optional: Init-Required Lifecycle
 
 Use `--init-required` to block normal invoke/query until one init transaction
 commits.
@@ -248,64 +275,57 @@ ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org
 ./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
 ./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
 ./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"compatv2","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 '{"Function":"compatv2","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"compat-v3","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 '{"Function":"compat-v3","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
 ```
 
-## Query State
+## Optional: Multi-Orchestrator Candidate Routing
 
-Run from `compatibility_service` in Terminal 6.
+Start a second org0 orchestrator:
 
 ```bash
-./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v2"]}'
+cd compatibility_service
+./bin/orchestrator -c sampleconfig/orchestrator0B.yaml --log-level info:grpc=error
 ```
 
-Expected:
+Restart the sample resolver with org0 candidates in priority order:
+
+```bash
+cd sample_external_resolver
+pkill -f 'sample-resolver.*127.0.0.1:9300' || true
+./bin/sample-resolver -listen 127.0.0.1:9300 -tls-mode mtls -tls-cert ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt -tls-key ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key -client-ca ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem,../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem -org0-orchestrator 127.0.0.1:9103,127.0.0.1:9102
+```
+
+Invoke through org1 so the org1 orchestrator asks the resolver for org0
+candidates:
+
+```bash
+cd compatibility_service
+./bin/client invoke -c sampleconfig/client-org1.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compat-v3","Args":["asset-org1-route","value-org1-route","asset-org1-route-delete"]}'
+```
+
+The org1 orchestrator log should include:
 
 ```text
-value-multiorg-v2
-```
-
-```bash
-./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v2-delete"]}'
-```
-
-Expected: empty output.
-
-## Inspect Blocks
-
-Run from the repository root:
-
-```bash
-txid=$(python3 -c 'import json; print(json.load(open("runtime/compatibility_service/compatv2-result.json"))["tx_id"])')
-./bin/block-dump -artifacts ./artifacts -txid "$txid"
-```
-
-Expected shape:
-
-```text
-Envelope type=MESSAGE/0 channel=channelqc4
-data: applicationpb.Tx namespaces=1 endorsements=1 metadata=2
-endorsements[0] signers=2
-signer[0] msp_id=org-0
-signer[1] msp_id=org-1
+remote orchestrator resolver dynamic grpc match requester_msp=org-1 target_msp=org-0 candidates=2
+requesting remote orchestrator msp=org-0 endpoint=127.0.0.1:9103
 ```
 
 ## Service Logs
 
-The orchestrator terminals show the execution path:
+Terminals 4 and 5 show orchestrator, helper, shim, and gRPC logs. Terminal 6
+prints the client JSON response.
+
+Useful lines:
 
 ```text
-[orchestrator] ProcessProposal -> tx=... namespace=1 chaincode=sample:1.0 fn=compatv2
+[orchestrator] ProcessProposal -> tx=... namespace=1 chaincode=sample:1.0 fn=compat-v3
 [shim] Execute -> tx=... ccaas connect endpoint=127.0.0.1:9999
 [helper] ProcessProposal -> tx=... chaincode execution completed status=200
 [orchestrator] submitAndWaitFinality -> tx=... finality status=COMMITTED block=...
 ```
 
-Terminal 6 prints the client JSON response. Terminals 4 and 5 print these
-service logs.
-
-## Test
+## Tests
 
 Run unit tests:
 
@@ -349,15 +369,23 @@ Full cleanup:
 ./scripts/clean.sh
 ```
 
-## Notes
+## Development Notes
 
 - Lifecycle installed packages are kept in memory inside each orchestrator.
 - Committed lifecycle definitions are written to Fabric-X ledger namespace `0`.
 - CCAAS and remote orchestrator endpoints are resolved lazily by static config
-  or the sample resolver.
+  or by the sample resolver.
 - The sample resolver accepts comma-separated `-org0-orchestrator` and
   `-org1-orchestrator` values and returns them as ordered candidates.
-- The sample resolver is not part of the compatibility service runtime; users
-  can replace it with their own resolver implementation.
-- Current lifecycle identity is `name:version`; traditional Fabric treats
-  `sequence` as the upgrade counter for a chaincode name.
+- The resolver is user-owned. Production routing, health checks, region
+  selection, and load preference belong behind that API.
+- Current lifecycle identity is `name:version`; `sequence` is the upgrade
+  counter for that chaincode identity.
+
+Additional developer notes:
+
+```text
+docs/architecture.md       execution path and helper semantics
+docs/lifecycle.md          compatibility lifecycle model
+docs/resolver.md           resolver API and multi-orchestrator routing
+```
