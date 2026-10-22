@@ -10,8 +10,8 @@ export ARTIFACTS_DIR="${ARTIFACTS_DIR:-${PROJECT_ROOT}/artifacts}"
 export STORAGE_DIR="${STORAGE_DIR:-${PROJECT_ROOT}/storage/arma}"
 export FABRIC_X_BIN="${FABRIC_X_BIN:-${PROJECT_ROOT}/bin}"
 
-export ORDERER_IMAGE="${ORDERER_IMAGE:-docker.io/hyperledger/arma-4p1s:project-local}"
-export COMMITTER_IMAGE="${COMMITTER_IMAGE:-docker.io/hyperledger/committer-test-node:project-local}"
+export ORDERER_IMAGE="${ORDERER_IMAGE:-docker.io/hyperledger/arma-4p1s:v1.0.3-project}"
+export COMMITTER_IMAGE="${COMMITTER_IMAGE:-docker.io/hyperledger/committer-test-node:v1.0.4-project}"
 
 COMPOSE_FILE="${PROJECT_ROOT}/docker-compose.yaml"
 export COMPOSE_FILE

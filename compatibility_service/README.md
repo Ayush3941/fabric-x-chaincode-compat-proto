@@ -36,6 +36,7 @@ pkg/config         YAML config structs and TLS/client helpers
 ```text
 client CLI
   -> orchestrator ProcessProposal
+  -> verify original client proposal and authorize chaincode/namespace
   -> local helper
   -> shim adapter
   -> external chaincode service
@@ -114,6 +115,11 @@ with `--host`:
 ./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0
 ```
 
+Orchestrator configs require `proposal-auth.msps` and `proposal-auth.rules`.
+These configure enrollment MSP trust and invocation permissions, independently
+of connection TLS. See [proposal authentication](../docs/architecture.md#proposal-authentication)
+for the configuration and rejection behavior.
+
 ## Tests
 
 ```bash
@@ -121,4 +127,7 @@ go test ./pkg/lifecycle ./pkg/orchestrator ./pkg/shim
 go test -tags=e2e ./integration/e2e -count=1 -v
 ```
 
-Run the e2e tests only after the Fabric-X network and sample services are up.
+Run the e2e tests after the Fabric-X network is up. The test harness starts its
+own orchestrators and CCAAS processes. `TestClientProposalAuthentication` checks
+both admission paths over mTLS and writes its committed transaction result to
+`../runtime/compatibility_service/e2e/proposal-auth-result.json` for block inspection.

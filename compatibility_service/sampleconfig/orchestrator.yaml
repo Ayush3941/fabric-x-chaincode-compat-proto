@@ -6,6 +6,18 @@ wait-after-submit: 0s
 request-timeout: 45s
 finality-timeout: 20s
 
+# Client proposal trust is separate from the TLS connection's CA roots.
+proposal-auth:
+  msps:
+    - msp-id: org-0
+      msp-dir: ../artifacts/peerOrganizations/peer-org-0/msp
+    - msp-id: org-1
+      msp-dir: ../artifacts/peerOrganizations/peer-org-1/msp
+  rules:
+    - chaincode: "*"
+      namespace: "*"
+      policy: "OR('org-0.member','org-1.member')"
+
 server:
   endpoint:
     host: 127.0.0.1
@@ -44,6 +56,13 @@ query-service:
 #       tls:
 #         mode: none
 chaincode-resolver:
+  static:
+    - msp-id: org-0
+      name: asset-transfer
+      version: "1.0"
+      address: 127.0.0.1:10001
+      tls:
+        mode: none
   dynamic:
     endpoint:
       host: 127.0.0.1

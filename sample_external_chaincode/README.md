@@ -7,10 +7,16 @@ The chaincode is ordinary Fabric chaincode served through
 `shim.ChaincodeServer`. The compatibility service connects to it through the
 Fabric CCAAS shim protocol.
 
+The module also includes the unchanged Fabric Samples Asset Transfer Basic
+contract. Follow the [root README workflow](../README.md#optional-fabric-samples-asset-transfer)
+for its full package-to-block demo and [source notes](asset_transfer/README.md)
+for the upstream revision and API limitations.
+
 ## Build
 
 ```bash
 go build -o bin/sample-chaincode ./cmd/server
+go build -o bin/asset-transfer-chaincode ./cmd/asset-transfer-server
 ```
 
 ## Run
@@ -54,6 +60,8 @@ CCAAS package inputs live under `cc_go/`:
 cc_go/org0_sample/   connection metadata for org0 at 127.0.0.1:9999
 cc_go/org1_sample/   connection metadata for org1 at 127.0.0.1:10000
 cc_go/e2e/           connection metadata for e2e test chaincode
+cc_go/org0_asset_transfer/   asset-transfer runtime at 127.0.0.1:10001
+cc_go/org1_asset_transfer/   asset-transfer runtime at 127.0.0.1:10002
 ```
 
 The lifecycle package command builds a Fabric-style external chaincode package

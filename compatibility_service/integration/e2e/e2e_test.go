@@ -24,6 +24,7 @@ import (
 	"compatibility_service/pkg/orchestrator"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	mspapi "github.com/hyperledger/fabric-protos-go-apiv2/msp"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-common/protoutil"
@@ -32,6 +33,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -253,13 +255,14 @@ func TestSameTxIDDifferentRequestConflicts(t *testing.T) {
 }
 
 type harnessOptions struct {
-	name         string
-	disableOrg1  bool
-	org0Sleep    string
-	org1Sleep    string
-	org1Mismatch string
-	requestWait  string
-	finality     string
+	name           string
+	disableOrg1    bool
+	org0Sleep      string
+	org1Sleep      string
+	org1Mismatch   string
+	requestWait    string
+	finality       string
+	proposalPolicy string
 }
 
 type testPorts struct {
@@ -271,10 +274,11 @@ type testPorts struct {
 }
 
 type e2eHarness struct {
-	root         string
-	compatDir    string
-	chaincodeDir string
-	ports        testPorts
+	root           string
+	compatDir      string
+	chaincodeDir   string
+	ports          testPorts
+	proposalPolicy string
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
@@ -288,16 +292,20 @@ func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
 	if opts.name == "" {
 		opts.name = "e2e"
 	}
+	if opts.proposalPolicy == "" {
+		opts.proposalPolicy = "OR('org-0.member','org-1.member')"
+	}
 
 	root := projectRoot(t)
 	ensureBinaries(t, root)
 	ensureNetworkReady(t, root)
 
 	h := &e2eHarness{
-		root:         root,
-		compatDir:    filepath.Join(root, "compatibility_service"),
-		chaincodeDir: filepath.Join(root, "sample_external_chaincode"),
-		ports:        nextPorts(),
+		root:           root,
+		compatDir:      filepath.Join(root, "compatibility_service"),
+		chaincodeDir:   filepath.Join(root, "sample_external_chaincode"),
+		ports:          nextPorts(),
+		proposalPolicy: opts.proposalPolicy,
 	}
 
 	logDir := filepath.Join(root, "runtime", "compatibility_service", "e2e")
@@ -446,6 +454,22 @@ remote-orchestrators:
 		h.helperTLSKey(org),
 		h.peerTLSCA(remoteOrg),
 	)
+	data += fmt.Sprintf(`
+proposal-auth:
+  msps:
+    - msp-id: org-0
+      msp-dir: %s
+    - msp-id: org-1
+      msp-dir: %s
+  rules:
+    - chaincode: "*"
+      namespace: "*"
+      policy: %q
+`,
+		h.artifact("peerOrganizations", "peer-org-0", "msp"),
+		h.artifact("peerOrganizations", "peer-org-1", "msp"),
+		h.proposalPolicy,
+	)
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write orchestrator config: %v", err)
 	}
@@ -478,39 +502,48 @@ func (h *e2eHarness) startProcess(t *testing.T, name, dir, logDir string, env []
 }
 
 func (h *e2eHarness) invokeSigned(ctx context.Context, prop *peer.SignedProposal) (orchestrator.InvocationResponse, error) {
-	peerClient, err := network.NewPeer(network.PeerConf{
-		Address: fmt.Sprintf("127.0.0.1:%d", h.ports.org0Orch),
-		TLS: network.TLSConfig{
-			Mode:        network.TLSModeMTLS,
-			CertPath:    h.clientTLSCert(0),
-			KeyPath:     h.clientTLSKey(0),
-			CACertPaths: []string{h.peerTLSCA(0)},
-			ServerName:  "127.0.0.1",
-		},
-	})
-	if err != nil {
-		return orchestrator.InvocationResponse{}, err
-	}
-	defer peerClient.Close() //nolint:errcheck
-
-	ctx = metadata.AppendToOutgoingContext(
-		ctx,
-		orchestrator.GRPCOperationMetadata, orchestrator.GRPCOperationInvoke,
-		orchestrator.GRPCNamespaceMetadata, namespace,
-	)
-	resp, err := peerClient.ProcessProposal(ctx, prop)
+	resp, err := h.processSigned(ctx, 0, orchestrator.GRPCOperationInvoke, prop)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, err
 	}
 	if resp == nil || resp.Response == nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("orchestrator returned no response")
 	}
-
 	var out orchestrator.InvocationResponse
 	if err := json.Unmarshal(resp.Response.Payload, &out); err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("decode orchestrator response: %w", err)
 	}
 	return out, nil
+}
+
+// The TLS caller stays org0 even when a test signs as another client. Proposal
+// admission must authenticate the original signer, independently of that caller.
+func (h *e2eHarness) processSigned(ctx context.Context, org int, operation string, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
+	port := h.ports.org0Orch
+	if org == 1 {
+		port = h.ports.org1Orch
+	}
+	peerClient, err := network.NewPeer(network.PeerConf{
+		Address: fmt.Sprintf("127.0.0.1:%d", port),
+		TLS: network.TLSConfig{
+			Mode:        network.TLSModeMTLS,
+			CertPath:    h.clientTLSCert(0),
+			KeyPath:     h.clientTLSKey(0),
+			CACertPaths: []string{h.peerTLSCA(org)},
+			ServerName:  "127.0.0.1",
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer peerClient.Close() //nolint:errcheck
+
+	ctx = metadata.AppendToOutgoingContext(
+		ctx,
+		orchestrator.GRPCOperationMetadata, operation,
+		orchestrator.GRPCNamespaceMetadata, namespace,
+	)
+	return peer.NewEndorserClient(peerClient.Connection()).ProcessProposal(ctx, prop)
 }
 
 func (h *e2eHarness) newSignedProposal(t *testing.T, function string, args ...string) (*peer.SignedProposal, string) {
@@ -520,13 +553,26 @@ func (h *e2eHarness) newSignedProposal(t *testing.T, function string, args ...st
 
 func (h *e2eHarness) newSignedProposalWithNonce(t *testing.T, nonce []byte, function string, args ...string) (*peer.SignedProposal, string) {
 	t.Helper()
-	signer, err := identity.SignerFromMSP(h.clientMSP(0), "org-0")
+	return h.newSignedProposalAs(t, nonce, 0, "", function, args...)
+}
+
+func (h *e2eHarness) newSignedProposalAs(t *testing.T, nonce []byte, org int, claimedMSP, function string, args ...string) (*peer.SignedProposal, string) {
+	t.Helper()
+	signer, err := identity.SignerFromMSP(h.clientMSP(org), fmt.Sprintf("org-%d", org))
 	if err != nil {
 		t.Fatalf("load client signer: %v", err)
 	}
 	creator, err := signer.Serialize()
 	if err != nil {
 		t.Fatalf("serialize client signer: %v", err)
+	}
+	if claimedMSP != "" {
+		serialized := &mspapi.SerializedIdentity{}
+		if err := proto.Unmarshal(creator, serialized); err != nil {
+			t.Fatal(err)
+		}
+		serialized.Mspid = claimedMSP
+		creator = protoutil.MarshalOrPanic(serialized)
 	}
 
 	inputArgs := make([][]byte, 0, 1+len(args))

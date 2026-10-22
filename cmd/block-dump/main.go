@@ -233,7 +233,18 @@ func dumpFabricXTx(data []byte, txID string) {
 			)
 		}
 	}
-	if metadata := bfabx.DecodeMetadata(tx.Metadata); len(metadata.Event) > 0 || metadata.EventName != "" {
+	metadata := bfabx.DecodeMetadata(tx.Metadata)
+	if len(metadata.InputArgs) > 0 {
+		args := make([]string, len(metadata.InputArgs))
+		for i, arg := range metadata.InputArgs {
+			args[i] = renderBytes(arg)
+		}
+		fmt.Printf("      input_args=[%s]\n", strings.Join(args, ", "))
+	}
+	if len(metadata.Payload) > 0 {
+		fmt.Printf("      response_payload=%s\n", renderBytes(metadata.Payload))
+	}
+	if len(metadata.Event) > 0 || metadata.EventName != "" {
 		chaincodeID := ""
 		if len(tx.Namespaces) > 0 {
 			chaincodeID = tx.Namespaces[0].NsId

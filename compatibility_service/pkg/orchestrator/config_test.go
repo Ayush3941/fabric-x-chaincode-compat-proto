@@ -85,5 +85,9 @@ func validConfigWithTimeouts(requestTimeout, finalityTimeout time.Duration) Conf
 		NotificationSvc: &cfgpkg.ClientConfig{Endpoint: endpoint},
 		RequestTimeout:  requestTimeout,
 		FinalityTimeout: finalityTimeout,
+		ProposalAuth: ProposalAuthConfig{
+			MSPs:  []ProposalMSPConfig{{MSPID: "org-0", MSPDir: "msp"}},
+			Rules: []ProposalAuthorizationRule{{Chaincode: "*", Namespace: "*", Policy: "OR('org-0.member')"}},
+		},
 	}
 }

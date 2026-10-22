@@ -66,6 +66,7 @@ type Config struct {
 	NotificationSvc    *config.ClientConfig             `mapstructure:"notification-service"`
 	RemoteOrgs         []RemoteOrchestratorConfig       `mapstructure:"remote-orchestrators"`
 	RemoteResolver     RemoteOrchestratorResolverConfig `mapstructure:"remote-orchestrator-resolver"`
+	ProposalAuth       ProposalAuthConfig               `mapstructure:"proposal-auth"`
 	WaitAfterSubmit    time.Duration                    `mapstructure:"wait-after-submit"`
 	RequestTimeout     time.Duration                    `mapstructure:"request-timeout"`
 	FinalityTimeout    time.Duration                    `mapstructure:"finality-timeout"`
@@ -157,6 +158,7 @@ type Service struct {
 	lifecycle    *lifecycle.Store
 	resolver     chaincodeConnectionResolver
 	remotes      remoteOrchestratorResolver
+	proposalAuth *proposalVerifier
 	logger       sdk.Logger
 }
 
@@ -185,6 +187,10 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	orchestratorLogger := loggerOrNoop(loggers.Orchestrator)
 	helperLogger := loggerOrNoop(loggers.Helper)
 	shimLogger := loggerOrNoop(loggers.Shim)
+	proposalAuth, err := newProposalVerifier(cfg.ProposalAuth)
+	if err != nil {
+		return nil, fmt.Errorf("configure proposal authentication: %w", err)
+	}
 
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
@@ -298,6 +304,7 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 		lifecycle:    lifecycleStore,
 		resolver:     resolver,
 		remotes:      remoteResolver,
+		proposalAuth: proposalAuth,
 		logger:       orchestratorLogger,
 	}
 	if err := svc.syncLifecycleFromLedger(ctx); err != nil {
@@ -313,6 +320,9 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 // Validate checks the endpoints needed for the current single-service flow.
 func (cfg Config) Validate() error {
 	var errs []error
+	if err := cfg.ProposalAuth.validate(); err != nil {
+		errs = append(errs, err)
+	}
 	if cfg.ChannelID == "" {
 		errs = append(errs, errors.New("channel-id is required"))
 	}
@@ -428,12 +438,19 @@ func (s *Service) RemotePeers(ctx context.Context, req lifecycle.RemotePeerReque
 
 // ProcessProposal accepts an MSP-signed Fabric proposal from the client.
 func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal) (*peer.ProposalResponse, error) {
+	if prop == nil || len(prop.ProposalBytes) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "client proposal is required")
+	}
 	inv, err := efab.Parse(prop, time.Now())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if inv.Channel != s.cfg.ChannelID {
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("channel must be %s", s.cfg.ChannelID))
+	}
+	clientIdentity, err := s.proposalAuth.authenticate(prop, inv.Creator, time.Now())
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, err.Error())
 	}
 
 	operation, err := operationFromContext(ctx)
@@ -454,6 +471,16 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	req.ClientCreator = append([]byte(nil), inv.Creator...)
 	req.ClientNonce = append([]byte(nil), inv.Nonce...)
 	req.ClientSignedProposal = cloneSignedProposal(prop)
+	namespace, _, err := s.prepareInvocation(req)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	req.Namespace = namespace
+	if err := s.proposalAuth.authorize(clientIdentity, req.ChaincodeName, namespace); err != nil {
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	s.logger.Infof("tx=%s client proposal authenticated msp=%s chaincode=%s namespace=%s operation=%s",
+		inv.TxID, clientIdentity.GetMSPIdentifier(), req.ChaincodeName, namespace, operation)
 	s.logger.Infof("tx=%s orchestrator proposal received operation=%s channel=%s namespace=%s chaincode=%s:%s is_init=%t fn=%s args=%d",
 		inv.TxID, operation, inv.Channel, req.Namespace, req.ChaincodeName, req.ChaincodeVersion, req.IsInit, req.Function, len(req.Args))
 

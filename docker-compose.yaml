@@ -8,7 +8,7 @@
 ---
 services:
   arma:
-    image: ${ORDERER_IMAGE:-docker.io/hyperledger/arma-4p1s:latest}
+    image: ${ORDERER_IMAGE:-docker.io/hyperledger/arma-4p1s:v1.0.3-project}
     container_name: project-arma
     entrypoint: ["/run_all.sh"]
     volumes:
@@ -27,7 +27,7 @@ services:
       - project-fx
 
   committer:
-    image: ${COMMITTER_IMAGE:-docker.io/hyperledger/committer-test-node:latest}
+    image: ${COMMITTER_IMAGE:-docker.io/hyperledger/committer-test-node:v1.0.4-project}
     container_name: project-committer
     command: ["run", "db", "init-db", "committer"]
     volumes:
