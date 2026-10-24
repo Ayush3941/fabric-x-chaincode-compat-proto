@@ -24,15 +24,16 @@ server:
     port: 9102
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
       - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
 
+# This instance has its own peer enrollment and TLS identities.
 identity:
   msp-id: org-0
-  msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/client@peer-org-0/msp
+  msp-dir: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/msp
 
 query-service:
   endpoint:
@@ -40,8 +41,8 @@ query-service:
     port: 7001
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1
@@ -69,8 +70,8 @@ chaincode-resolver:
       port: 9300
     tls:
       mode: mtls
-      cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-      key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+      cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+      key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
       ca-cert-paths:
         - ../artifacts/peerOrganizations/peer-org-0/tlsca/tlsca.peer-org-0-cert.pem
       server-name: 127.0.0.1
@@ -81,8 +82,8 @@ orderer:
     port: 6022
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/ordererOrganizations/orderer-org-1/msp/tlscacerts/tlsca.orderer-org-1-cert.pem
     server-name: 127.0.0.1
@@ -93,8 +94,8 @@ notification-service:
     port: 4001
   tls:
     mode: mtls
-    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+    cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+    key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
     ca-cert-paths:
       - ../artifacts/peerOrganizations/peer-org-0/msp/tlscacerts/tlsca.peer-org-0-cert.pem
     server-name: 127.0.0.1
@@ -107,8 +108,8 @@ remote-orchestrator-resolver:
         port: 9202
       tls:
         mode: mtls
-        cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.crt
-        key-path: ../artifacts/peerOrganizations/peer-org-0/peers/helper.peer-org-0/tls/server.key
+        cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.crt
+        key-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/tls/server.key
         ca-cert-paths:
           - ../artifacts/peerOrganizations/peer-org-1/tlsca/tlsca.peer-org-1-cert.pem
         server-name: 127.0.0.1

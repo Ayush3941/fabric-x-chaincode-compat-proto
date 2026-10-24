@@ -263,6 +263,7 @@ type harnessOptions struct {
 	requestWait    string
 	finality       string
 	proposalPolicy string
+	deferFinality  bool
 }
 
 type testPorts struct {
@@ -279,6 +280,8 @@ type e2eHarness struct {
 	chaincodeDir   string
 	ports          testPorts
 	proposalPolicy string
+	namespace      string
+	finalityProxy  *deferredFinalityService
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
@@ -316,6 +319,9 @@ func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
 	cfgDir := t.TempDir()
 	org0Cfg := h.writeOrchestratorConfig(t, cfgDir, 0, h.ports.org0Orch, h.ports.org0CC, 1, h.remoteOrg1Port(opts), opts.requestWait, opts.finality)
 	org1Cfg := h.writeOrchestratorConfig(t, cfgDir, 1, h.ports.org1Orch, h.ports.org1CC, 0, h.ports.org0Orch, opts.requestWait, opts.finality)
+	if opts.deferFinality {
+		h.finalityProxy = h.startDeferredFinality(t, org0Cfg)
+	}
 
 	h.startProcess(t, "chaincode-org0", h.chaincodeDir, logDir, []string{envIfSet("E2E_COMPATV2_SLEEP", opts.org0Sleep)}, "./bin/e2e-chaincode", "-ccid", "0:sample", "-address", fmt.Sprintf("127.0.0.1:%d", h.ports.org0CC))
 	waitForPort(t, h.ports.org0CC)
@@ -432,26 +438,26 @@ remote-orchestrators:
 		requestWait,
 		finality,
 		serverPort,
-		h.helperTLSCert(org),
-		h.helperTLSKey(org),
+		h.orchestratorTLSCert(org),
+		h.orchestratorTLSKey(org),
 		h.peerTLSCA(0),
 		h.peerTLSCA(1),
 		org,
-		h.clientMSP(org),
-		h.helperTLSCert(org),
-		h.helperTLSKey(org),
+		h.orchestratorMSP(org),
+		h.orchestratorTLSCert(org),
+		h.orchestratorTLSKey(org),
 		h.peerMSPTLSCA(0),
 		ccPort,
-		h.helperTLSCert(org),
-		h.helperTLSKey(org),
+		h.orchestratorTLSCert(org),
+		h.orchestratorTLSKey(org),
 		h.ordererTLSCA(1),
-		h.helperTLSCert(org),
-		h.helperTLSKey(org),
+		h.orchestratorTLSCert(org),
+		h.orchestratorTLSKey(org),
 		h.peerMSPTLSCA(0),
 		remoteOrg,
 		remotePort,
-		h.helperTLSCert(org),
-		h.helperTLSKey(org),
+		h.orchestratorTLSCert(org),
+		h.orchestratorTLSKey(org),
 		h.peerTLSCA(remoteOrg),
 	)
 	data += fmt.Sprintf(`
@@ -538,10 +544,14 @@ func (h *e2eHarness) processSigned(ctx context.Context, org int, operation strin
 	}
 	defer peerClient.Close() //nolint:errcheck
 
+	targetNamespace := h.namespace
+	if targetNamespace == "" {
+		targetNamespace = namespace
+	}
 	ctx = metadata.AppendToOutgoingContext(
 		ctx,
 		orchestrator.GRPCOperationMetadata, operation,
-		orchestrator.GRPCNamespaceMetadata, namespace,
+		orchestrator.GRPCNamespaceMetadata, targetNamespace,
 	)
 	return peer.NewEndorserClient(peerClient.Connection()).ProcessProposal(ctx, prop)
 }
@@ -654,8 +664,8 @@ func (h *e2eHarness) waitForHeight(t *testing.T, min uint64) uint64 {
 func (h *e2eHarness) blockQueryConn() (*grpc.ClientConn, error) {
 	tlsCfg, err := (network.TLSConfig{
 		Mode:        network.TLSModeMTLS,
-		CertPath:    h.helperTLSCert(0),
-		KeyPath:     h.helperTLSKey(0),
+		CertPath:    h.orchestratorTLSCert(0),
+		KeyPath:     h.orchestratorTLSKey(0),
 		CACertPaths: []string{h.peerMSPTLSCA(0)},
 		ServerName:  "127.0.0.1",
 	}).LoadClientTLSConfig("127.0.0.1")
@@ -815,14 +825,19 @@ func (h *e2eHarness) peerOrg(org int) string {
 	return fmt.Sprintf("peer-org-%d", org)
 }
 
-func (h *e2eHarness) helperTLSCert(org int) string {
+func (h *e2eHarness) orchestratorTLSCert(org int) string {
 	peerOrg := h.peerOrg(org)
-	return h.artifact("peerOrganizations", peerOrg, "peers", "helper."+peerOrg, "tls", "server.crt")
+	return h.artifact("peerOrganizations", peerOrg, "peers", fmt.Sprintf("orchestrator%d.%s", org, peerOrg), "tls", "server.crt")
 }
 
-func (h *e2eHarness) helperTLSKey(org int) string {
+func (h *e2eHarness) orchestratorTLSKey(org int) string {
 	peerOrg := h.peerOrg(org)
-	return h.artifact("peerOrganizations", peerOrg, "peers", "helper."+peerOrg, "tls", "server.key")
+	return h.artifact("peerOrganizations", peerOrg, "peers", fmt.Sprintf("orchestrator%d.%s", org, peerOrg), "tls", "server.key")
+}
+
+func (h *e2eHarness) orchestratorMSP(org int) string {
+	peerOrg := h.peerOrg(org)
+	return h.artifact("peerOrganizations", peerOrg, "peers", fmt.Sprintf("orchestrator%d.%s", org, peerOrg), "msp")
 }
 
 func (h *e2eHarness) clientTLSCert(org int) string {

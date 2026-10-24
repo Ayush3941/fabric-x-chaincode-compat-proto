@@ -150,27 +150,34 @@ func (v *proposalVerifier) authenticate(prop *peer.SignedProposal, creator []byt
 	if err := identity.Validate(); err != nil {
 		return nil, fmt.Errorf("untrusted proposal creator: %w", err)
 	}
-	// MSP validation also supports historical ledger identities. Admission of a
-	// new proposal must additionally require a certificate valid at the present time.
-	certPEM, err := identity.GetCertificatePEM()
-	if err != nil {
-		return nil, fmt.Errorf("read proposal creator certificate: %w", err)
-	}
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return nil, errors.New("proposal creator certificate is not PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse proposal creator certificate: %w", err)
-	}
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-		return nil, errors.New("proposal creator certificate is outside its validity period")
+	if err := validateIdentityTime(identity, now); err != nil {
+		return nil, err
 	}
 	if err := identity.Verify(prop.ProposalBytes, prop.Signature); err != nil {
 		return nil, fmt.Errorf("invalid client proposal signature: %w", err)
 	}
 	return identity, nil
+}
+
+func validateIdentityTime(identity msp.Identity, now time.Time) error {
+	// MSP validation also supports historical ledger identities. Admission of a
+	// new proposal or endorsement must also require a currently valid certificate.
+	certPEM, err := identity.GetCertificatePEM()
+	if err != nil {
+		return fmt.Errorf("read identity certificate: %w", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return errors.New("identity certificate is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse identity certificate: %w", err)
+	}
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return errors.New("identity certificate is outside its validity period")
+	}
+	return nil
 }
 
 func (v *proposalVerifier) authorize(identity msp.Identity, chaincode, namespace string) error {

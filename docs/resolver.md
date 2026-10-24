@@ -86,6 +86,19 @@ Response:
 The compatibility layer tries candidates in order. If the first endpoint fails,
 it tries the next endpoint for the same MSP.
 
+An endpoint returning an endorsement does not necessarily finish collection.
+The Orchestrator validates the actual signing certificate and namespace
+signature, then checks whether the collected distinct identities satisfy the
+policy. It can continue to other candidates in the same MSP for a different
+role or an additional signer. The resolver does not need to advertise roles or
+certificates; endpoint labels and metadata are not treated as proof of identity.
+
+To support policies requiring multiple signers in one organization, return
+instances configured with different signing certificates. Multiple endpoints
+using the same certificate count as one signer. Additional endpoints belonging
+to the initiating organization can be configured using its own MSP ID; they
+participate in endorsement collection and are skipped by lifecycle coordination.
+
 ## Routing Policy
 
 Routing policy belongs outside the compatibility layer. A resolver can choose

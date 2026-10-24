@@ -22,6 +22,7 @@ inspected with `bin/block-dump`.
 
 - External Go chaincode through `shim.ChaincodeServer`
 - MSP namespace policies and Fabric-X threshold-rule namespace policies
+- Policy-aware selection of distinct signing identities and signature verification before submission
 - Two-organization endorsement for namespace `1`
 - Original client proposal signature/MSP verification and invocation permissions
 - Lifecycle package, install, approve, readiness, commit, query, and init gate
@@ -30,7 +31,7 @@ inspected with `bin/block-dump`.
 - Static or resolver-based CCAAS endpoint lookup
 - Static or resolver-based remote orchestrator lookup
 - Multiple orchestrator candidates per organization
-- `GetState`, `PutState`, `DelState`, and read-your-writes
+- `GetState`, `PutState`, and `DelState` with committed-state reads
 - `GetArgs`, `GetStringArgs`, `GetFunctionAndParameters`
 - `GetTxID`, `GetChannelID`, `GetCreator`, `GetBinding`, `GetDecorations`
 - `GetSignedProposal`, `GetTransient`, `GetTxTimestamp`
@@ -449,7 +450,7 @@ Run unit tests:
 
 ```bash
 cd compatibility_service
-go test ./pkg/lifecycle ./pkg/orchestrator ./pkg/shim
+go test ./pkg/helper ./pkg/lifecycle ./pkg/orchestrator ./pkg/shim
 ```
 
 Run real-network integration tests after setup:
@@ -474,6 +475,19 @@ txid=$(python3 -c 'import json; print(json.load(open("runtime/compatibility_serv
 The authentication test checks rejected proposals against both organizations
 over mTLS, confirms they do not create blocks, and then commits an authorized
 transaction with both endorsements and a chaincode event.
+
+The policy integration test creates an isolated namespace, updates its policy,
+and verifies a committed transaction with two distinct org0 signing certificates
+after trying a duplicate-certificate instance. It also checks that existing
+Orchestrators sign using the updated namespace policy version:
+
+```bash
+cd compatibility_service
+go test -tags=e2e ./integration/e2e -run '^TestDistinctSameOrgEndorsementsAndPolicyUpdate$' -count=1 -v
+```
+
+Its result and block are saved under
+`runtime/compatibility_service/endorsement-policy/`.
 
 Avoid `go test ./...` from the repository root after the network has started;
 Docker-owned files under `storage/` can interfere with package discovery.

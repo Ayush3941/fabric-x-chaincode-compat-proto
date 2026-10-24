@@ -125,6 +125,7 @@ type InvocationResponse struct {
 	Payload           string                      `json:"payload,omitempty"`
 	PayloadBase64     string                      `json:"payload_base64,omitempty"`
 	Submitted         bool                        `json:"submitted"`
+	FinalityPending   bool                        `json:"finality_pending,omitempty"`
 	CommitStatus      string                      `json:"commit_status,omitempty"`
 	BlockNum          uint64                      `json:"block_num,omitempty"`
 	TxNum             uint32                      `json:"tx_num,omitempty"`
@@ -143,6 +144,11 @@ type ChaincodeEvent struct {
 	PayloadBase64 string `json:"payload_base64,omitempty"`
 }
 
+type transactionSubmitter interface {
+	Submit(context.Context, sdk.Endorsement) error
+	Close() error
+}
+
 // Service is the orchestrator process.
 type Service struct {
 	cfg          Config
@@ -151,7 +157,7 @@ type Service struct {
 	queryPeer    *network.Peer
 	queryService committerpb.QueryServiceClient
 	policies     *namespacePolicyResolver
-	submitter    *network.Submitter
+	submitter    transactionSubmitter
 	notifier     *network.Peer
 	notify       committerpb.NotifierClient
 	idempotency  *idempotencyStore
@@ -546,7 +552,11 @@ func (s *Service) EndorseOnly(ctx context.Context, req InvocationRequest) (helpe
 	if _, err := s.validateInitState(ctx, req, namespace, GRPCOperationEndorse); err != nil {
 		return helperExecutionResult{}, err
 	}
-	result, err := s.executeFresh(ctx, req, namespace, args)
+	policy, err := s.resolveNamespacePolicy(ctx, namespace)
+	if err != nil {
+		return helperExecutionResult{}, fmt.Errorf("resolve namespace policy: %w", err)
+	}
+	result, err := s.executeFresh(ctx, req, namespace, policy.Version, args)
 	if err != nil {
 		return helperExecutionResult{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
@@ -568,6 +578,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 
 	var record *idempotencyRecord
 	if submit {
+		s.reconcilePending(ctx)
 		req.IdempotencyKey, req.RequestDigest = idempotencyIdentity(s.cfg.ChannelID, namespace, req, submit)
 		var firstRequest bool
 		record, firstRequest, err = s.idempotency.begin(req.IdempotencyKey, req.RequestDigest)
@@ -576,7 +587,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		}
 		if !firstRequest {
 			s.logger.Infof("idempotency_key=%s duplicate request detected; waiting for stored result", req.IdempotencyKey)
-			out, err := s.idempotency.wait(ctx, record)
+			out, err := s.replaySubmission(ctx, record)
 			out.IdempotentReplay = true
 			return out, err
 		}
@@ -594,7 +605,7 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return InvocationResponse{}, fmt.Errorf("resolve namespace policy: %w", err)
 	}
 
-	localResult, err := s.executeFresh(ctx, req, namespace, args)
+	localResult, err := s.executeFresh(ctx, req, namespace, policy.Version, args)
 	if err != nil {
 		return InvocationResponse{}, fmt.Errorf("helper endorsement failed: %w", err)
 	}
@@ -617,29 +628,20 @@ func (s *Service) Execute(ctx context.Context, req InvocationRequest, submit boo
 		return out, nil
 	}
 
-	remoteResults, err := s.requestRemoteOrchestratorsIfPolicyNeedsThem(ctx, policy, req, localResult)
+	merged, remoteResults, err := s.collectNamespaceEndorsements(ctx, policy, req, localResult)
 	if err != nil {
 		return out, err
 	}
 	out.LifecycleBindings = lifecycleBindings(localResult, remoteResults)
-	if err := compareCanonicalResults(localResult, remoteResults); err != nil {
-		return out, err
-	}
-	merged, err := mergeEndorsements(localResult, remoteResults)
-	if err != nil {
-		return out, err
-	}
 
-	out, err = s.submitAndWaitFinality(ctx, merged, out, localResult.TxID, record)
-	if err != nil {
-		return out, err
-	}
-	if req.IsInit && out.CommitStatus == committerpb.Status_COMMITTED.String() && initDefinition != nil {
-		if err := s.markInitializedAfterCommit(ctx, *initDefinition); err != nil {
-			return out, err
+	var afterCommit func(context.Context) error
+	if req.IsInit && initDefinition != nil {
+		def := *initDefinition
+		afterCommit = func(commitCtx context.Context) error {
+			return s.markInitializedAfterCommit(commitCtx, def)
 		}
 	}
-	return out, err
+	return s.submitAndWaitFinality(ctx, merged, out, localResult.TxID, record, afterCommit)
 }
 
 func (s *Service) prepareInvocation(req InvocationRequest) (string, [][]byte, error) {

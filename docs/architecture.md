@@ -32,7 +32,8 @@ client signed proposal
   -> namespace policy lookup from Query Service
   -> local helper execution
   -> remote helper execution through remote orchestrators when policy requires it
-  -> canonical result comparison
+  -> canonical result comparison and signer selection
+  -> verify selected namespace endorsements
   -> Fabric-X endorsement merge
   -> orderer submit
   -> finality wait
@@ -102,35 +103,68 @@ state directly.
 
 ```text
 GetState(key)
-  -> check local overlay
-  -> if absent, read committed value from Fabric-X Query Service
+  -> read committed value from Fabric-X Query Service
+  -> record the key's committed version or absence for MVCC validation
 
 PutState(key, value)
-  -> update local overlay
-  -> record write effect
+  -> record pending write effect
 
 DelState(key)
-  -> update local overlay
-  -> record delete effect
+  -> record pending delete effect
 ```
 
-The local overlay provides read-your-writes inside one chaincode invocation.
-Fabric-X validation still checks the final read/write effects at commit time.
+`GetState` returns committed values even after the same invocation calls
+`PutState` or `DelState` for that key, matching Fabric's simulation semantics.
+Pending writes and deletions are retained for the transaction's write set;
+Fabric-X validates the recorded read versions before committing those effects.
 
 ## Remote Endorsement
 
-Namespace policy is evaluated at MSP level. If namespace `1` requires
-`org-0` and `org-1`, the initiating orchestrator runs local execution and asks
-the remote org's orchestrator for execute-only endorsement.
+Namespace policies are evaluated against actual signing identities. For an MSP
+policy, each endorsement's certificate is validated against the trusted MSPs in
+`proposal-auth.msps`, its MSP is checked against the requested organization, and
+its signature is verified over the native namespace transaction and metadata.
+Invocation permissions in `proposal-auth.rules` remain separate from namespace
+endorsement requirements.
 
 ```text
 policy requirement: org-1
 resolver result:    [org1-orchestrator-a, org1-orchestrator-b]
-execution:          try candidates in order until one endorsement succeeds
+execution:          try candidates in order until a valid signature selection satisfies the policy
 ```
 
-Only one successful endorsement per required MSP is used in the merged
-Fabric-X transaction.
+`AND`, `OR`, and `OutOf` rules may require distinct signers from the same MSP.
+The collector continues through that organization's candidates when necessary;
+duplicate certificates do not count as additional signers, even if returned by
+different endpoints or serialized differently. Alternative organizations in an
+`OR` or `OutOf` policy can be tried after a candidate fails.
+
+Principal matching uses the configured MSP implementation, including roles,
+organizational units, exact identities, combined principals, and nominal X.509
+identities. Roles such as `.peer` and `.client` require the appropriate MSP Node
+OU configuration. The sample network uses `.member` policies because its MSPs
+disable Node OUs.
+
+The selector assigns each signing identity at most once and considers alternate
+assignments when broad and specific principals overlap. Nested policies can
+require extra signatures and a different order under Fabric-X's evaluator; the
+selector searches these alternatives within the request deadline. The final
+selection, including its signature order, is checked with the same namespace signature
+verifier used by Fabric-X before submission. Key-based threshold policies are
+also verified against their configured key. A mismatch between executions
+aborts the request; a policy without enough qualifying identities is not
+submitted.
+
+The Orchestrator and each execute-only remote resolve the current namespace
+policy version independently and pass it to the helper's native endorsement
+builder. Different versions therefore produce different transaction payloads
+and cannot be merged. Fabric-X still performs final policy and MVCC validation.
+
+Each Orchestrator signs using its configured `identity`. To provide two signers
+from the same organization, configure separate instances with different signing
+certificates and list their endpoints under that MSP using the existing static
+or dynamic resolver. Additional same-organization endpoints are excluded from
+cross-organization lifecycle RPCs.
 
 ## Result Matching
 
@@ -148,8 +182,28 @@ If results differ, the transaction is not submitted.
 ## Finality
 
 For invokes, the orchestrator subscribes to Notification Service finality before
-submitting the merged endorsement. The client response includes the final commit
-status and block number when the notification arrives.
+submitting the merged endorsement and waits once within the request's deadline.
+
+If the caller's finality wait expires after submission, the response contains
+`submitted: true` and `finality_pending: true`, without a commit status or
+committed event. The local transaction remains `SUBMITTED`; notification
+timeouts, rejected subscriptions, query failures, and missing statuses do not
+establish a ledger outcome. That client request then ends and its notification
+subscription is canceled. There are no background trackers or periodic checks.
+
+When a later invoke arrives, the Orchestrator makes one batched Query Service
+request for older pending transactions and refreshes its internal store using
+confirmed validation results. It skips transactions whose original requests are
+still waiting for finality. Missing statuses and query failures leave records
+`SUBMITTED`. This maintenance never resubmits transactions or adds older results
+to the new invocation's response; the client receives only its requested
+transaction. Explicitly retrying the same signed proposal reuses that
+transaction's stored result without executing or submitting again.
+
+A confirmed validation result moves the record to `COMPLETED` and supplies the
+commit status and block location. Only `COMMITTED` responses include chaincode
+events and trigger init finalization. These records remain instance-local and
+in memory; recovery across restarts or other Orchestrators is not provided.
 
 Queries use the same helper execution path but do not submit to the orderer and
 do not emit committed chaincode events.

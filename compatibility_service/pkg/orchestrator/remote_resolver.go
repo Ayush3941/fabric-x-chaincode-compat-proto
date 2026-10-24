@@ -189,8 +189,14 @@ func (r *staticRemoteOrchestratorResolver) Resolve(_ context.Context, req remote
 	return append([]*OrchestratorContact(nil), contacts...), true, nil
 }
 
-func (r *staticRemoteOrchestratorResolver) RemotePeers(context.Context, remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error) {
-	return lifecycleRemoteCandidates(r.contacts), nil
+func (r *staticRemoteOrchestratorResolver) RemotePeers(_ context.Context, req remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error) {
+	var peers []lifecycle.RemotePeer
+	for _, peer := range lifecycleRemoteCandidates(r.contacts) {
+		if peer.MSPID() != req.RequesterMSPID {
+			peers = append(peers, peer)
+		}
+	}
+	return peers, nil
 }
 
 func (r *staticRemoteOrchestratorResolver) Close() error {
@@ -303,6 +309,9 @@ func (r *dynamicRemoteOrchestratorResolver) Resolve(ctx context.Context, req rem
 func (r *dynamicRemoteOrchestratorResolver) RemotePeers(ctx context.Context, req remoteOrchestratorResolveRequest) ([]lifecycle.RemotePeer, error) {
 	peers := make([]lifecycle.RemotePeer, 0, len(r.targetMSPIDs))
 	for _, mspID := range r.targetMSPIDs {
+		if mspID == req.RequesterMSPID {
+			continue
+		}
 		targetReq := req
 		targetReq.TargetMSPID = mspID
 		contacts, ok, err := r.Resolve(ctx, targetReq)

@@ -108,6 +108,12 @@ PeerOrgs:
         SANS: [127.0.0.1, 0.0.0.0, localhost, committer]
       - Hostname: helper
         SANS: [127.0.0.1, 0.0.0.0, localhost]
+      # Peer is the certificate/MSP classification; these run Orchestrators.
+      # Separate identities, both using organizational MSP ID org-0.
+      - Hostname: orchestrator0
+        SANS: [127.0.0.1, 0.0.0.0, localhost]
+      - Hostname: orchestrator0b
+        SANS: [127.0.0.1, 0.0.0.0, localhost]
     Users:
       Count: 1
       Specs:
@@ -120,6 +126,9 @@ PeerOrgs:
       Hostname: ca
     Specs:
       - Hostname: helper
+        SANS: [127.0.0.1, 0.0.0.0, localhost]
+      # Orchestrator identity with peer certificate OU and MSP ID org-1.
+      - Hostname: orchestrator1
         SANS: [127.0.0.1, 0.0.0.0, localhost]
     Users:
       Count: 1

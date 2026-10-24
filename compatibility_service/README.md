@@ -89,8 +89,14 @@ Remote orchestrator resolution is MSP-based:
 ```text
 namespace policy says: need org-0
 resolver returns: ordered org-0 orchestrator candidates
-orchestrator tries: first candidate, then fallback candidates
+orchestrator verifies: distinct signer identities until the policy is satisfied
 ```
+
+Returned certificates are validated against `proposal-auth.msps`; namespace
+policies determine which roles and identities must endorse. Multiple signers
+from the same MSP can be collected when needed, and the final signature set is
+verified locally before submission. Each instance uses its configured signing
+identity, so multiple endpoints sharing a certificate count as one signer.
 
 The resolver request includes `requester_msp_id`, `target_msp_id`, channel,
 namespace, chaincode name, version, and sequence. A user-owned resolver can use

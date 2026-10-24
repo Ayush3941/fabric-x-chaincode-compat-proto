@@ -51,29 +51,34 @@ type ClientProposalContext struct {
 	Nonce          []byte
 	SignedProposal *peer.SignedProposal
 	Decorations    map[string][]byte
+	// NamespaceVersion is resolved by the Orchestrator, independently of the
+	// original Fabric proposal's chaincode version.
+	NamespaceVersion uint64
 }
 
 // WithClientProposal carries original client proposal fields through the
 // in-process helper path so chaincode sees the invoking client's context.
 func WithClientProposal(ctx context.Context, proposal ClientProposalContext) context.Context {
-	if len(proposal.Creator) == 0 && len(proposal.Nonce) == 0 && proposal.SignedProposal == nil && len(proposal.Decorations) == 0 {
+	if len(proposal.Creator) == 0 && len(proposal.Nonce) == 0 && proposal.SignedProposal == nil && len(proposal.Decorations) == 0 && proposal.NamespaceVersion == 0 {
 		return ctx
 	}
 	return context.WithValue(ctx, clientProposalContextKey{}, ClientProposalContext{
-		Creator:        append([]byte(nil), proposal.Creator...),
-		Nonce:          append([]byte(nil), proposal.Nonce...),
-		SignedProposal: cloneSignedProposal(proposal.SignedProposal),
-		Decorations:    cloneByteMap(proposal.Decorations),
+		Creator:          append([]byte(nil), proposal.Creator...),
+		Nonce:            append([]byte(nil), proposal.Nonce...),
+		SignedProposal:   cloneSignedProposal(proposal.SignedProposal),
+		Decorations:      cloneByteMap(proposal.Decorations),
+		NamespaceVersion: proposal.NamespaceVersion,
 	})
 }
 
 func clientProposalFromContext(ctx context.Context) ClientProposalContext {
 	proposal, _ := ctx.Value(clientProposalContextKey{}).(ClientProposalContext)
 	return ClientProposalContext{
-		Creator:        append([]byte(nil), proposal.Creator...),
-		Nonce:          append([]byte(nil), proposal.Nonce...),
-		SignedProposal: cloneSignedProposal(proposal.SignedProposal),
-		Decorations:    cloneByteMap(proposal.Decorations),
+		Creator:          append([]byte(nil), proposal.Creator...),
+		Nonce:            append([]byte(nil), proposal.Nonce...),
+		SignedProposal:   cloneSignedProposal(proposal.SignedProposal),
+		Decorations:      cloneByteMap(proposal.Decorations),
+		NamespaceVersion: proposal.NamespaceVersion,
 	}
 }
 
@@ -231,16 +236,9 @@ func (c *ExecutionContext) SetDecorations(decorations map[string][]byte) {
 	c.decorations = cloneByteMap(decorations)
 }
 
-// GetState is the method the future shim handler should call for GetState
-// messages. It checks the per-invocation overlay first, then Query Service.
+// GetState reads committed state and records its version for MVCC validation.
+// Pending writes and deletions do not affect reads during Fabric simulation.
 func (c *ExecutionContext) GetState(ctx context.Context, key string) ([]byte, error) {
-	if w, ok := c.writes[key]; ok {
-		if w.IsDelete {
-			return nil, nil
-		}
-		return append([]byte(nil), w.Value...), nil
-	}
-
 	value, err := c.reader.GetState(ctx, c.queryView, c.namespace, key)
 	if err != nil {
 		return nil, err
@@ -370,6 +368,7 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 		inv.TxID, inv.Channel, inv.Namespace, inv.ChaincodeVersion, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.Namespace)
 	proposal := clientProposalFromContext(ctx)
+	inv.NsVersion = proposal.NamespaceVersion
 	creator := proposal.Creator
 	if len(creator) == 0 {
 		creator = inv.Creator
