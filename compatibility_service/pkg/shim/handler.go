@@ -98,7 +98,7 @@ func (h *messageHandler) Execute(ctx context.Context) (Result, error) {
 }
 
 func (h *messageHandler) sendTransaction() error {
-	input := &peer.ChaincodeInput{Args: h.inv.Args, Decorations: cloneByteMap(h.inv.Decorations)}
+	input := &peer.ChaincodeInput{Args: h.inv.Args, Decorations: cloneByteMap(h.inv.Decorations), IsInit: h.inv.IsInit}
 	payload, err := proto.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("marshal transaction input: %w", err)
@@ -108,17 +108,21 @@ func (h *messageHandler) sendTransaction() error {
 		return err
 	}
 
+	messageType := peer.ChaincodeMessage_TRANSACTION
+	if h.inv.IsInit {
+		messageType = peer.ChaincodeMessage_INIT
+	}
 	msg := &peer.ChaincodeMessage{
-		Type:      peer.ChaincodeMessage_TRANSACTION,
+		Type:      messageType,
 		Payload:   payload,
 		Txid:      h.inv.TxID,
 		ChannelId: h.inv.ChannelID,
 		Proposal:  proposal,
 	}
-	h.logger.Infof("tx=%s shim TRANSACTION sent ccid=%s fn=%s args=%d channel=%s creator_bytes=%d",
-		h.inv.TxID, h.ccid, firstArg(h.inv.Args), len(h.inv.Args)-1, h.inv.ChannelID, len(h.inv.Creator))
+	h.logger.Infof("tx=%s shim %s sent ccid=%s fn=%s args=%d channel=%s creator_bytes=%d",
+		h.inv.TxID, messageType, h.ccid, firstArg(h.inv.Args), len(h.inv.Args)-1, h.inv.ChannelID, len(h.inv.Creator))
 	if err := h.stream.Send(msg); err != nil {
-		return fmt.Errorf("send TRANSACTION to chaincode: %w", err)
+		return fmt.Errorf("send %s to chaincode: %w", messageType, err)
 	}
 	return nil
 }
@@ -147,6 +151,7 @@ func (h *messageHandler) signedProposal() (*peer.SignedProposal, error) {
 				Input: &peer.ChaincodeInput{
 					Args:        h.inv.Args,
 					Decorations: cloneByteMap(h.inv.Decorations),
+					IsInit:      h.inv.IsInit,
 				},
 			},
 		},

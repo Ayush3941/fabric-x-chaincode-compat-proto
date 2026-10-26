@@ -7,17 +7,38 @@ import (
 	"fmt"
 
 	"compatibility_service/pkg/lifecycle"
+	"google.golang.org/grpc/metadata"
 )
 
+// The signed proposal owns the init intent. Legacy metadata may assert the
+// same value, but cannot override it at either the initiating or remote node.
+func validateInitMetadata(ctx context.Context, isInit bool) error {
+	for _, value := range metadata.ValueFromIncomingContext(ctx, GRPCInitMetadata) {
+		if value != "true" && value != "false" {
+			return fmt.Errorf("invalid is-init metadata %q", value)
+		}
+		if (value == "true") != isInit {
+			return fmt.Errorf("is-init metadata conflicts with the signed proposal")
+		}
+	}
+	return nil
+}
+
 func (s *Service) validateInitState(ctx context.Context, req InvocationRequest, namespace, operation string) (*lifecycle.ChaincodeDefinition, error) {
+	if req.IsInit && operation == GRPCOperationQuery {
+		return nil, fmt.Errorf("is-init is only valid for invoke")
+	}
 	if s == nil || s.lifecycle == nil {
+		if req.IsInit {
+			return nil, fmt.Errorf("initialization requires a lifecycle definition")
+		}
 		return nil, nil
 	}
 	if req.ChaincodeName == "" || req.ChaincodeVersion == "" {
+		if req.IsInit {
+			return nil, fmt.Errorf("initialization requires a chaincode name and version")
+		}
 		return nil, nil
-	}
-	if req.IsInit && operation == GRPCOperationQuery {
-		return nil, fmt.Errorf("is-init is only valid for invoke")
 	}
 
 	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName, req.ChaincodeVersion)
@@ -25,6 +46,9 @@ func (s *Service) validateInitState(ctx context.Context, req InvocationRequest, 
 		return nil, err
 	}
 	if !ok {
+		if req.IsInit {
+			return nil, fmt.Errorf("initialization requires a committed definition for %s:%s", req.ChaincodeName, req.ChaincodeVersion)
+		}
 		return nil, nil
 	}
 	def := committed.Definition

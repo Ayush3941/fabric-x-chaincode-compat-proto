@@ -110,7 +110,6 @@ func (c *OrchestratorContact) EndorseOnly(ctx context.Context, req InvocationReq
 		ctx,
 		GRPCOperationMetadata, GRPCOperationEndorse,
 		GRPCNamespaceMetadata, req.Namespace,
-		GRPCInitMetadata, fmt.Sprintf("%t", req.IsInit),
 	)
 	var header metadata.MD
 	var trailer metadata.MD

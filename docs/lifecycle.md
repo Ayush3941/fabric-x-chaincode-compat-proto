@@ -110,7 +110,34 @@ answer `querycommitted` without copying memory from another orchestrator.
 ## Init Gate
 
 If a definition is committed with `--init-required`, normal invoke/query is
-blocked until one invoke is sent with `--is-init` and commits.
+blocked until initialization commits and its initialized lifecycle marker is
+confirmed. Initialization requires a committed, init-required definition that
+has not already been marked initialized.
+
+The client includes `--is-init` in the signed proposal's
+`ChaincodeInput.IsInit` field. Every participating Orchestrator reads that signed
+field independently. The legacy `x-compat-is-init` metadata can only assert the
+same value; conflicting or invalid metadata is rejected before execution.
+
+The helper carries the flag into the CCaaS shim bridge. Initialization sends
+`ChaincodeMessage_INIT` to call Go chaincode's `Init()` method; ordinary requests
+send `TRANSACTION` to call `Invoke()`. Query operations reject initialization.
+The pinned SDK proposal parser requires at least one argument, including for
+initialization; proposals with an empty argument list are not supported.
+The original signed proposal, arguments, identity, transient data, and helper
+state handling remain available during `Init()` execution. The standard Go
+Contract API's `Init()` can delegate to the requested contract function.
 
 After that init transaction commits, the orchestrator writes another lifecycle
-marker to mark the definition initialized.
+marker to mark the definition initialized and propagates the marker to other
+organizations. Failed initialization does not mark a definition initialized;
+sequential reinitialization is rejected after the marker is applied.
+
+Fabric-X Committer v1.0.4 rejects transaction namespaces with no writes as
+`MALFORMED_NO_WRITES`. An `Init()` that returns success without writing state is
+therefore submitted but rejected by native validation, and the definition stays
+uninitialized. The sample `Init()` initializes a key with the supplied value.
+
+These are sequential lifecycle checks. An atomic ledger guard against concurrent
+initialization across Orchestrators is not implemented. Recovery when the
+separate initialized-marker transaction times out also remains outstanding.

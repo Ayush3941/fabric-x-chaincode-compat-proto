@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-committer/utils/serve"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
+	"github.com/hyperledger/fabric-x-common/protoutil"
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"github.com/hyperledger/fabric-x-sdk/blocks"
 	"github.com/hyperledger/fabric-x-sdk/endorsement"
@@ -53,6 +54,7 @@ type ClientProposalContext struct {
 	Nonce          []byte
 	SignedProposal *peer.SignedProposal
 	Decorations    map[string][]byte
+	IsInit         bool
 	// NamespaceVersion is resolved by the Orchestrator, independently of the
 	// original Fabric proposal's chaincode version.
 	NamespaceVersion uint64
@@ -61,7 +63,7 @@ type ClientProposalContext struct {
 // WithClientProposal carries original client proposal fields through the
 // in-process helper path so chaincode sees the invoking client's context.
 func WithClientProposal(ctx context.Context, proposal ClientProposalContext) context.Context {
-	if len(proposal.Creator) == 0 && len(proposal.Nonce) == 0 && proposal.SignedProposal == nil && len(proposal.Decorations) == 0 && proposal.NamespaceVersion == 0 {
+	if len(proposal.Creator) == 0 && len(proposal.Nonce) == 0 && proposal.SignedProposal == nil && len(proposal.Decorations) == 0 && proposal.NamespaceVersion == 0 && !proposal.IsInit {
 		return ctx
 	}
 	return context.WithValue(ctx, clientProposalContextKey{}, ClientProposalContext{
@@ -70,6 +72,7 @@ func WithClientProposal(ctx context.Context, proposal ClientProposalContext) con
 		SignedProposal:   cloneSignedProposal(proposal.SignedProposal),
 		Decorations:      cloneByteMap(proposal.Decorations),
 		NamespaceVersion: proposal.NamespaceVersion,
+		IsInit:           proposal.IsInit,
 	})
 }
 
@@ -81,6 +84,7 @@ func clientProposalFromContext(ctx context.Context) ClientProposalContext {
 		SignedProposal:   cloneSignedProposal(proposal.SignedProposal),
 		Decorations:      cloneByteMap(proposal.Decorations),
 		NamespaceVersion: proposal.NamespaceVersion,
+		IsInit:           proposal.IsInit,
 	}
 }
 
@@ -187,6 +191,7 @@ type ExecutionContext struct {
 	viewOwned      bool
 	closed         bool
 	readErr        error
+	isInit         bool
 	clientCreator  []byte
 	clientNonce    []byte
 	signedProposal *peer.SignedProposal
@@ -216,6 +221,12 @@ func NewExecutionContextWithView(reader StateReader, namespace string, view *com
 // Namespace returns the Fabric-X namespace backing this invocation.
 func (c *ExecutionContext) Namespace() string {
 	return c.namespace
+}
+
+// IsInit selects the shim entry point for this invocation. It is immutable
+// during execution and comes from the proposal's ChaincodeInput.IsInit field.
+func (c *ExecutionContext) IsInit() bool {
+	return c.isInit
 }
 
 // QueryView returns the Query Service view used for committed-state reads.
@@ -466,6 +477,10 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
 		inv.TxID, inv.Channel, inv.Namespace, inv.ChaincodeVersion, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.Namespace)
+	execCtx.isInit, err = ProposalIsInit(inv.Proposal)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	defer func() {
 		// The caller may have canceled or exhausted its deadline. Cleanup still
 		// gets one bounded attempt; Query Service also expires abandoned views.
@@ -489,6 +504,14 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if signedProposal == nil {
 		signedProposal = prop
 	}
+	original, err := protoutil.UnmarshalProposal(signedProposal.ProposalBytes)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	originalInit, err := ProposalIsInit(original)
+	if err != nil || originalInit != execCtx.IsInit() {
+		return nil, status.Error(codes.InvalidArgument, "helper init intent differs from the original proposal")
+	}
 	execCtx.SetClientCreator(creator)
 	execCtx.SetClientNonce(nonce)
 	execCtx.SetClientSignedProposal(signedProposal)
@@ -510,6 +533,11 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	rws := execCtx.Result()
 	s.logger.Infof("tx=%s chaincode execution completed status=%d reads=%d writes=%d payload_bytes=%d event_bytes=%d",
 		inv.TxID, res.Status, len(rws.Reads), len(rws.Writes), len(res.Payload), len(res.Event))
+	if res.Status < 200 || res.Status >= 400 {
+		// A failed execution must not yield signatures over its pending writes.
+		// Return its chaincode error without a Fabric-X endorsement payload.
+		return &peer.ProposalResponse{Response: res.Response()}, nil
+	}
 
 	s.logger.Infof("tx=%s building Fabric-X endorsement namespace=%s reads=%d writes=%d event_bytes=%d",
 		inv.TxID, inv.Namespace, len(rws.Reads), len(rws.Writes), len(res.Event))

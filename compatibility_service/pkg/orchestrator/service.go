@@ -45,7 +45,7 @@ import (
 const (
 	GRPCOperationMetadata = "x-compat-operation"
 	GRPCNamespaceMetadata = "x-compat-namespace"
-	GRPCInitMetadata      = "x-compat-is-init"
+	GRPCInitMetadata      = "x-compat-is-init" // Legacy assertion; signed ChaincodeInput.IsInit is authoritative.
 	GRPCOperationInvoke   = "invoke"
 	GRPCOperationQuery    = "query"
 	GRPCOperationEndorse  = "endorse"
@@ -472,7 +472,12 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if namespace, ok := namespaceFromContext(ctx); ok {
 		req.Namespace = namespace
 	}
-	req.IsInit = initFromContext(ctx)
+	if err := validateInitMetadata(ctx, req.IsInit); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if req.IsInit && operation == GRPCOperationQuery {
+		return nil, status.Error(codes.InvalidArgument, "is-init is only valid for invoke")
+	}
 	req.ClientTxID = inv.TxID
 	req.ClientCreator = append([]byte(nil), inv.Creator...)
 	req.ClientNonce = append([]byte(nil), inv.Nonce...)
@@ -700,7 +705,31 @@ func (s *Service) helperProposal(namespace, nsVersion string, args [][]byte, tra
 		if err != nil {
 			return nil, fmt.Errorf("create helper proposal: %w", err)
 		}
-		return prop, nil
+		if !clientProposal.IsInit {
+			return prop, nil
+		}
+		proposal, err := protoutil.UnmarshalProposal(prop.ProposalBytes)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := protoutil.UnmarshalChaincodeProposalPayload(proposal.Payload)
+		if err != nil {
+			return nil, err
+		}
+		spec, err := protoutil.UnmarshalChaincodeInvocationSpec(payload.Input)
+		if err != nil {
+			return nil, err
+		}
+		spec.ChaincodeSpec.Input.IsInit = true
+		payload.Input, err = proto.Marshal(spec)
+		if err != nil {
+			return nil, err
+		}
+		proposal.Payload, err = proto.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		return protoutil.GetSignedProposal(proposal, s.signer)
 	}
 
 	txID := protoutil.ComputeTxID(clientProposal.Nonce, clientProposal.Creator)
@@ -718,6 +747,7 @@ func (s *Service) helperProposal(namespace, nsVersion string, args [][]byte, tra
 				Input: &peer.ChaincodeInput{
 					Args:        args,
 					Decorations: cloneByteMap(clientProposal.Decorations),
+					IsInit:      clientProposal.IsInit,
 				},
 			},
 		},
@@ -882,16 +912,6 @@ func namespaceFromContext(ctx context.Context) (string, bool) {
 	return values[0], true
 }
 
-func initFromContext(ctx context.Context) bool {
-	values := metadata.ValueFromIncomingContext(ctx, GRPCInitMetadata)
-	for _, value := range values {
-		if value == "true" {
-			return true
-		}
-	}
-	return false
-}
-
 func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) {
 	if len(inv.Args) < 1 {
 		return InvocationRequest{}, errors.New("orchestrator proposal requires function")
@@ -908,6 +928,10 @@ func requestFromProposal(inv endorsement.Invocation) (InvocationRequest, error) 
 			return InvocationRequest{}, fmt.Errorf("unmarshal proposal payload: %w", err)
 		}
 		req.ClientTransient = cloneByteMap(cpp.TransientMap)
+		req.IsInit, err = helper.ProposalIsInit(inv.Proposal)
+		if err != nil {
+			return InvocationRequest{}, err
+		}
 	}
 	for _, arg := range inv.Args[1:] {
 		req.Args = append(req.Args, string(arg))

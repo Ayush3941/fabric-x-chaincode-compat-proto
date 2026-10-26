@@ -210,7 +210,7 @@ ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org
 ./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 
 
 
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 --is-init '{"Function":"compatv2","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
 ```
 
 ## 5. Invoke Compat-v3
@@ -381,7 +381,10 @@ sequence-1 approvals against a definition that is already committed.
 ## Optional: Init-Required Lifecycle
 
 Use `--init-required` to block normal invoke/query until one init transaction
-commits.
+commits and its initialized marker is confirmed. `--is-init` calls the actual
+chaincode `Init()` entry point. The sample's `Init()` accepts `initialize` with a
+key and value to store. The current Fabric-X Committer requires at least one
+write in each transaction namespace, so a no-op `Init()` cannot commit.
 
 ```bash
 ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=org0_sample_1:/{print $2; exit}')
@@ -390,7 +393,7 @@ ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org
 ./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
 ./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
 ./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"compat-v3","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
 ./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 '{"Function":"compat-v3","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
 ```
 

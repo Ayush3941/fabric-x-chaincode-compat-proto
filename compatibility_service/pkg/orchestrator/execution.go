@@ -32,6 +32,7 @@ func (s *Service) executeFresh(ctx context.Context, req InvocationRequest, names
 		SignedProposal:   req.ClientSignedProposal,
 		Decorations:      compatibilityDecorations(namespace, req.ChaincodeName, req.ChaincodeVersion),
 		NamespaceVersion: namespaceVersion,
+		IsInit:           req.IsInit,
 	}
 	end, err := s.executeHelper(ctx, namespace, "1.0", args, req.ClientTransient, clientProposal)
 	if err != nil {

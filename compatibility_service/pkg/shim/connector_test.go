@@ -104,6 +104,7 @@ func TestExecuteRunsCCAASMessageLoop(t *testing.T) {
 type handshakeChaincodeServer struct {
 	peer.UnimplementedChaincodeServer
 	received chan peer.ChaincodeMessage_Type
+	isInit   bool
 }
 
 func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) error {
@@ -130,8 +131,12 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 	if err != nil {
 		return err
 	}
-	if txMsg.Type != peer.ChaincodeMessage_TRANSACTION {
-		return fmt.Errorf("message = %s, want TRANSACTION", txMsg.Type)
+	wantType := peer.ChaincodeMessage_TRANSACTION
+	if s.isInit {
+		wantType = peer.ChaincodeMessage_INIT
+	}
+	if txMsg.Type != wantType {
+		return fmt.Errorf("message = %s, want %s", txMsg.Type, wantType)
 	}
 	if txMsg.Txid != "tx1" {
 		return fmt.Errorf("txid = %q, want tx1", txMsg.Txid)
@@ -142,6 +147,9 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 	input := &peer.ChaincodeInput{}
 	if err := proto.Unmarshal(txMsg.Payload, input); err != nil {
 		return err
+	}
+	if input.IsInit != s.isInit {
+		return fmt.Errorf("input init flag = %t, want %t", input.IsInit, s.isInit)
 	}
 	if len(input.Args) != 2 || string(input.Args[0]) != "transfer" || string(input.Args[1]) != "asset1" {
 		return fmt.Errorf("unexpected transaction args: %q", input.Args)
@@ -158,6 +166,17 @@ func (s *handshakeChaincodeServer) Connect(stream peer.Chaincode_ConnectServer) 
 	proposal := &peer.Proposal{}
 	if err := proto.Unmarshal(txMsg.Proposal.ProposalBytes, proposal); err != nil {
 		return err
+	}
+	proposalPayload, err := protoutil.UnmarshalChaincodeProposalPayload(proposal.Payload)
+	if err != nil {
+		return err
+	}
+	spec, err := protoutil.UnmarshalChaincodeInvocationSpec(proposalPayload.Input)
+	if err != nil {
+		return err
+	}
+	if spec.ChaincodeSpec.Input.IsInit != s.isInit {
+		return fmt.Errorf("signed proposal init flag = %t, want %t", spec.ChaincodeSpec.Input.IsInit, s.isInit)
 	}
 	header := &common.Header{}
 	if err := proto.Unmarshal(proposal.Header, header); err != nil {
@@ -222,6 +241,7 @@ func testSignedProposal(
 	creator []byte,
 	nonce []byte,
 	signature []byte,
+	isInit ...bool,
 ) *peer.SignedProposal {
 	t.Helper()
 
@@ -238,6 +258,7 @@ func testSignedProposal(
 				Input: &peer.ChaincodeInput{
 					Args:        args,
 					Decorations: cloneByteMap(decorations),
+					IsInit:      len(isInit) > 0 && isInit[0],
 				},
 			},
 		},

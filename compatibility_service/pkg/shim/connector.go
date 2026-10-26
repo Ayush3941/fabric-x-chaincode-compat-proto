@@ -44,6 +44,7 @@ type Invocation struct {
 	SignedProposal *peer.SignedProposal
 	Decorations    map[string][]byte
 	QueryView      *committerpb.View
+	IsInit         bool
 }
 
 // Result is the chaincode execution result returned by the shim bridge.
@@ -96,7 +97,7 @@ func (c *Connector) SetLogger(logger sdk.Logger) {
 //   - dial the configured endpoint
 //   - open peer.Chaincode/Connect
 //   - complete REGISTER / REGISTERED / READY
-//   - send the TRANSACTION message for inv
+//   - send INIT or TRANSACTION according to the proposal's init intent
 //   - answer GET_STATE, PUT_STATE, and DEL_STATE through State
 //   - return the chaincode COMPLETED or ERROR response
 func (c *Connector) Execute(ctx context.Context, state State, inv Invocation) (Result, error) {

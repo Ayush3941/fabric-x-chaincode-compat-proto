@@ -150,7 +150,7 @@ Service finality, and returns the final status.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&isInit, "is-init", false, "Mark this invoke as the lifecycle init transaction")
+	cmd.Flags().BoolVar(&isInit, "is-init", false, "Call Init for a committed init-required chaincode definition")
 	return cmd
 }
 
@@ -260,7 +260,7 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, ccName, ccVers
 		return orchestrator.InvocationResponse{}, fmt.Errorf("unknown orchestrator operation %q", operation)
 	}
 
-	prop, err := newSignedProposal(signer, cfg.ChannelID, ccName, ccVersion, txArgs, transient)
+	prop, err := newSignedProposal(signer, cfg.ChannelID, ccName, ccVersion, txArgs, transient, isInit)
 	if err != nil {
 		return orchestrator.InvocationResponse{}, fmt.Errorf("create signed proposal: %w", err)
 	}
@@ -275,7 +275,6 @@ func callOrchestrator(ctx context.Context, cfg Config, namespace, ccName, ccVers
 		ctx,
 		orchestrator.GRPCOperationMetadata, operation,
 		orchestrator.GRPCNamespaceMetadata, namespace,
-		orchestrator.GRPCInitMetadata, fmt.Sprintf("%t", isInit),
 	)
 	resp, err := peer.NewEndorserClient(orchestratorPeer.Connection()).ProcessProposal(ctx, prop)
 	if err != nil {
@@ -302,6 +301,7 @@ func newSignedProposal(
 	nsVersion string,
 	args [][]byte,
 	transient map[string][]byte,
+	isInit bool,
 ) (*peer.SignedProposal, error) {
 	creator, err := signer.Serialize()
 	if err != nil {
@@ -325,7 +325,8 @@ func newSignedProposal(
 					Version: nsVersion,
 				},
 				Input: &peer.ChaincodeInput{
-					Args: args,
+					Args:   args,
+					IsInit: isInit,
 				},
 			},
 		},

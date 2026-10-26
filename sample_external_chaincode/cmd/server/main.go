@@ -21,6 +21,13 @@ import (
 type SimpleKVChaincode struct{}
 
 func (c *SimpleKVChaincode) Init(stub shim.ChaincodeStubInterface) *pb.Response {
+	fn, args := stub.GetFunctionAndParameters()
+	if fn != "initialize" || len(args) != 2 {
+		return shim.Error("initialize expects 2 arguments: key value")
+	}
+	if err := stub.PutState(args[0], []byte(args[1])); err != nil {
+		return shim.Error(err.Error())
+	}
 	return shim.Success(nil)
 }
 

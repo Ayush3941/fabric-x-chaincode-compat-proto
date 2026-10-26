@@ -48,6 +48,7 @@ func (e ChaincodeServiceExecutor) Execute(ctx context.Context, execCtx *Executio
 		SignedProposal: execCtx.ClientSignedProposal(),
 		Decorations:    execCtx.Decorations(),
 		QueryView:      execCtx.QueryView(),
+		IsInit:         execCtx.IsInit(),
 	})
 	if err != nil {
 		return endorsement.ExecutionResult{}, ExecutionMetadata{}, err

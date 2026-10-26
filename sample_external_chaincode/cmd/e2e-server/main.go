@@ -19,7 +19,23 @@ import (
 type E2EChaincode struct{}
 
 func (c *E2EChaincode) Init(stub shim.ChaincodeStubInterface) *pb.Response {
-	return shim.Success(nil)
+	fn, args := stub.GetFunctionAndParameters()
+	if fn != "initialize" || len(args) != 2 {
+		return shim.Error("Init expects initialize with key and value")
+	}
+	if args[1] == "noop-init" {
+		return shim.Success(nil)
+	}
+	if err := stub.PutState(args[0], []byte(args[1])); err != nil {
+		return shim.Error(err.Error())
+	}
+	if args[1] == "fail-init" {
+		return shim.Error("deliberate initialization failure")
+	}
+	if err := stub.SetEvent("initialized", []byte(args[1])); err != nil {
+		return shim.Error(err.Error())
+	}
+	return shim.Success([]byte("init-called"))
 }
 
 func (c *E2EChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Response {
