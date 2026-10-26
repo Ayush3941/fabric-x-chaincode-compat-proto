@@ -199,22 +199,18 @@ cd /home/kali/Desktop/LFX/Project/compatibility_service
 ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=org0_sample_1:/{print $2; exit}')
 ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 | awk -F= '/^package_id=org1_sample_1:/{print $2; exit}')
 
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG"
-./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG"
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --package-id "$ORG0_PKG" --init-required
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
 
-./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
-./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1
+./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --init-required
 
-./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0
-./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 1.0
-```
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 1.0 --sequence 1 --init-required
 
-Expected commit output includes:
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 
 
-```text
-ledger_status=COMMITTED
-org-0=true
-org-1=true
+
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 --is-init '{"Function":"compatv2","Args":["asset-init-demo","value-init-demo","asset-init-demo-delete"]}'
 ```
 
 ## 5. Invoke Compat-v3
