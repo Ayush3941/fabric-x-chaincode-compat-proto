@@ -103,7 +103,8 @@ state directly.
 
 ```text
 GetState(key)
-  -> read committed value from Fabric-X Query Service
+  -> on the first read, begin a repeatable-read Query Service view
+  -> read committed value through that invocation's view
   -> record the key's committed version or absence for MVCC validation
 
 PutState(key, value)
@@ -117,6 +118,28 @@ DelState(key)
 `PutState` or `DelState` for that key, matching Fabric's simulation semantics.
 Pending writes and deletions are retained for the transaction's write set;
 Fabric-X validates the recorded read versions before committing those effects.
+
+Each helper owns one view per invocation and opens it only when chaincode first
+reads state. Subsequent reads, including reads of different keys, use that same
+view while concurrent transactions continue committing. The helper closes the
+view when execution ends, including on errors or cancellation; cleanup has a
+separate two-second deadline. Invocations that never read state do not open
+views. A mutex protects only the invocation's view and read/write bookkeeping;
+it does not lock committed state or coordinate other invocations.
+
+View creation and read failures abort execution, even if chaincode ignores the
+read error. An expired view is never replaced with a newer snapshot mid-execution.
+The Query Service caps view lifetime (`max-view-timeout`, currently 10 seconds in
+the sample configuration). It can also aggregate nearby view handles onto the
+same database snapshot, so a new handle does not select a historical block or
+guarantee the newest network-wide block. Snapshot establishment and aggregation
+remain Query Service responsibilities.
+
+View IDs stay local to each helper. Organizations independently establish their
+views; their Orchestrators compare the resulting responses and read/write sets
+without exchanging view IDs. Different committed key versions can still prevent
+endorsement aggregation, and MVCC can still reject a transaction whose read
+dependencies changed before validation.
 
 ## Remote Endorsement
 

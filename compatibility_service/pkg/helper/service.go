@@ -8,7 +8,9 @@ package helper
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
@@ -101,8 +103,10 @@ type VersionedValue struct {
 	Version *blocks.Version
 }
 
-// StateReader is the stateless state dependency required by ExecutionContext.
+// StateReader supplies committed state and invocation-local Query Service views.
 type StateReader interface {
+	BeginView(context.Context) (*committerpb.View, error)
+	EndView(context.Context, *committerpb.View) error
 	GetState(ctx context.Context, view *committerpb.View, namespace, key string) (VersionedValue, error)
 }
 
@@ -114,6 +118,29 @@ type QueryServiceStateReader struct {
 // NewQueryServiceStateReader creates a Query Service backed StateReader.
 func NewQueryServiceStateReader(client committerpb.QueryServiceClient) *QueryServiceStateReader {
 	return &QueryServiceStateReader{client: client}
+}
+
+// BeginView allocates a repeatable-read view. Query Service establishes its
+// database snapshot when the first query uses the view and caps its lifetime.
+func (r *QueryServiceStateReader) BeginView(ctx context.Context) (*committerpb.View, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	params := &committerpb.ViewParameters{IsoLevel: committerpb.IsoLevel_REPEATABLE_READ}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		params.TimeoutMilliseconds = uint64(max(1, remaining.Milliseconds()))
+	}
+	return r.client.BeginView(ctx, params)
+}
+
+// EndView releases the invocation's read-only database snapshot.
+func (r *QueryServiceStateReader) EndView(ctx context.Context, view *committerpb.View) error {
+	_, err := r.client.EndView(ctx, view)
+	return err
 }
 
 // GetState reads one key from Query Service and converts the row version into
@@ -153,9 +180,13 @@ func (r *QueryServiceStateReader) GetState(ctx context.Context, view *committerp
 // is not durable storage. It records the dependencies and effects that will be
 // converted into a Fabric-X transaction after execution.
 type ExecutionContext struct {
+	mu             sync.Mutex
 	reader         StateReader
 	namespace      string
 	queryView      *committerpb.View
+	viewOwned      bool
+	closed         bool
+	readErr        error
 	clientCreator  []byte
 	clientNonce    []byte
 	signedProposal *peer.SignedProposal
@@ -169,8 +200,9 @@ func NewExecutionContext(reader StateReader, namespace string) *ExecutionContext
 	return NewExecutionContextWithView(reader, namespace, nil)
 }
 
-// NewExecutionContextWithView creates the transient context using a Query
-// Service view supplied by an orchestrator.
+// NewExecutionContextWithView creates a context using a borrowed Query Service
+// view. Its caller owns that view's cleanup. Production invocations allocate
+// their own views lazily through NewExecutionContext.
 func NewExecutionContextWithView(reader StateReader, namespace string, view *committerpb.View) *ExecutionContext {
 	return &ExecutionContext{
 		reader:    reader,
@@ -188,12 +220,44 @@ func (c *ExecutionContext) Namespace() string {
 
 // QueryView returns the Query Service view used for committed-state reads.
 func (c *ExecutionContext) QueryView() *committerpb.View {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.queryView
 }
 
-// SetQueryView records the Query Service view used for this invocation.
-func (c *ExecutionContext) SetQueryView(view *committerpb.View) {
+// SetQueryView attaches a borrowed view before the first state read. An
+// invocation cannot replace its view after reading or after a read failure.
+func (c *ExecutionContext) SetQueryView(view *committerpb.View) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.queryView != nil || c.readErr != nil {
+		return errors.New("execution query view is already initialized or closed")
+	}
 	c.queryView = view
+	return nil
+}
+
+// Err returns the first state-read failure. The helper must not endorse an
+// execution that ignored a failed or expired snapshot read.
+func (c *ExecutionContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readErr
+}
+
+// Close releases a view created by this context, at most once. It never creates
+// a view for an invocation that did not read state.
+func (c *ExecutionContext) Close(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	if !c.viewOwned {
+		return nil
+	}
+	return c.reader.EndView(ctx, c.queryView)
 }
 
 // ClientCreator returns the serialized creator from the original client proposal.
@@ -239,9 +303,38 @@ func (c *ExecutionContext) SetDecorations(decorations map[string][]byte) {
 // GetState reads committed state and records its version for MVCC validation.
 // Pending writes and deletions do not affect reads during Fabric simulation.
 func (c *ExecutionContext) GetState(ctx context.Context, key string) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("execution context is closed")
+	}
+	if c.readErr != nil {
+		return nil, c.readErr
+	}
+	if err := ctx.Err(); err != nil {
+		c.readErr = err
+		return nil, err
+	}
+	if c.reader == nil {
+		c.readErr = errors.New("committed-state reader is not configured")
+		return nil, c.readErr
+	}
+	if c.queryView == nil {
+		view, err := c.reader.BeginView(ctx)
+		if err != nil {
+			c.readErr = fmt.Errorf("begin execution query view: %w", err)
+			return nil, c.readErr
+		}
+		if view == nil || view.Id == "" {
+			c.readErr = errors.New("query service returned an empty execution view")
+			return nil, c.readErr
+		}
+		c.queryView, c.viewOwned = view, true
+	}
 	value, err := c.reader.GetState(ctx, c.queryView, c.namespace, key)
 	if err != nil {
-		return nil, err
+		c.readErr = fmt.Errorf("read committed state in execution query view: %w", err)
+		return nil, c.readErr
 	}
 	c.reads[key] = blocks.KVRead{Key: key, Version: value.Version}
 	return append([]byte(nil), value.Value...), nil
@@ -249,16 +342,22 @@ func (c *ExecutionContext) GetState(ctx context.Context, key string) ([]byte, er
 
 // PutState records a pending write for this invocation only.
 func (c *ExecutionContext) PutState(key string, value []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.writes[key] = blocks.KVWrite{Key: key, Value: append([]byte(nil), value...)}
 }
 
 // DelState records a pending delete for this invocation only.
 func (c *ExecutionContext) DelState(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.writes[key] = blocks.KVWrite{Key: key, IsDelete: true}
 }
 
 // Result returns the captured read/write set for endorsement.
 func (c *ExecutionContext) Result() blocks.ReadWriteSet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	rws := blocks.ReadWriteSet{
 		Reads:  make([]blocks.KVRead, 0, len(c.reads)),
 		Writes: make([]blocks.KVWrite, 0, len(c.writes)),
@@ -367,6 +466,15 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	s.logger.Infof("tx=%s helper proposal received channel=%s namespace=%s version=%s fn=%s args=%d",
 		inv.TxID, inv.Channel, inv.Namespace, inv.ChaincodeVersion, argString(inv.Args, 0), len(inv.Args)-1)
 	execCtx := NewExecutionContext(s.stateReader, inv.Namespace)
+	defer func() {
+		// The caller may have canceled or exhausted its deadline. Cleanup still
+		// gets one bounded attempt; Query Service also expires abandoned views.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if err := execCtx.Close(cleanupCtx); err != nil {
+			s.logger.Warnf("tx=%s close execution query view: %s", inv.TxID, err)
+		}
+	}()
 	proposal := clientProposalFromContext(ctx)
 	inv.NsVersion = proposal.NamespaceVersion
 	creator := proposal.Creator
@@ -391,6 +499,9 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	res, meta, err := executor.Execute(ctx, execCtx, inv)
 	if err != nil {
 		s.logger.Warnf("tx=%s chaincode execution failed: %s", inv.TxID, err)
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if err := execCtx.Err(); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if meta.QueryView != nil {

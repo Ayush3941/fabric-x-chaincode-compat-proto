@@ -118,6 +118,14 @@ func TestGetStatePropagatesCommittedReadErrorWithPendingWrites(t *testing.T) {
 
 type stateReaderFunc func(context.Context, *committerpb.View, string, string) (VersionedValue, error)
 
+func (f stateReaderFunc) BeginView(context.Context) (*committerpb.View, error) {
+	return &committerpb.View{Id: "test-execution-view"}, nil
+}
+
+func (f stateReaderFunc) EndView(context.Context, *committerpb.View) error {
+	return nil
+}
+
 func (f stateReaderFunc) GetState(ctx context.Context, view *committerpb.View, namespace, key string) (VersionedValue, error) {
 	return f(ctx, view, namespace, key)
 }

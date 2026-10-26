@@ -193,6 +193,14 @@ func (p *deferredFinalityService) GetRows(ctx context.Context, query *committerp
 	return p.upstream.GetRows(ctx, query)
 }
 
+func (p *deferredFinalityService) BeginView(ctx context.Context, params *committerpb.ViewParameters) (*committerpb.View, error) {
+	return p.upstream.BeginView(ctx, params)
+}
+
+func (p *deferredFinalityService) EndView(ctx context.Context, view *committerpb.View) (*emptypb.Empty, error) {
+	return p.upstream.EndView(ctx, view)
+}
+
 func (p *deferredFinalityService) GetNamespacePolicies(ctx context.Context, query *emptypb.Empty) (*applicationpb.NamespacePolicies, error) {
 	return p.upstream.GetNamespacePolicies(ctx, query)
 }
