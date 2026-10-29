@@ -53,7 +53,7 @@ func TestDistinctSameOrgEndorsementsAndPolicyUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondaryBytes = []byte(strings.NewReplacer(
-		h.orchestratorMSP(0), filepath.Join(secondaryNode, "msp"),
+		"msp-dir: "+h.orchestratorMSP(0), "msp-dir: "+filepath.Join(secondaryNode, "msp"),
 		h.orchestratorTLSCert(0), filepath.Join(secondaryNode, "tls", "server.crt"),
 		h.orchestratorTLSKey(0), filepath.Join(secondaryNode, "tls", "server.key"),
 	).Replace(string(secondaryBytes)))

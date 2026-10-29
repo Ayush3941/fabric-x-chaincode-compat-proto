@@ -476,6 +476,25 @@ proposal-auth:
 		h.artifact("peerOrganizations", "peer-org-1", "msp"),
 		h.proposalPolicy,
 	)
+	data += fmt.Sprintf(`
+lifecycle-auth:
+  policies:
+    install: "OR('org-%d.admin')"
+    queryinstalled: "OR('org-%d.admin')"
+    approveformyorg: "OR('org-%d.admin')"
+    checkcommitreadiness: "OR('org-0.member','org-1.member')"
+    commit: "OR('org-0.member','org-1.member')"
+    querycommitted: "OR('org-0.member','org-1.member')"
+  orchestrators:
+`, org, org, org)
+	for _, node := range []struct {
+		org  int
+		name string
+	}{{0, "orchestrator0"}, {0, "orchestrator0b"}, {1, "orchestrator1"}} {
+		cert := h.artifact("peerOrganizations", fmt.Sprintf("peer-org-%d", node.org), "peers", fmt.Sprintf("%s.peer-org-%d", node.name, node.org), "msp", "signcerts", fmt.Sprintf("%s.peer-org-%d-cert.pem", node.name, node.org))
+		data += fmt.Sprintf("    - msp-id: org-%d\n      cert-path: %s\n", node.org, cert)
+	}
+
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write orchestrator config: %v", err)
 	}

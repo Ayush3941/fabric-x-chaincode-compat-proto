@@ -153,7 +153,7 @@ func (c *OrchestratorContact) CheckCommitReadiness(ctx context.Context, req *lif
 		return nil, errors.New("remote orchestrator contact is not configured")
 	}
 	c.logger.Infof("requesting remote lifecycle readiness msp=%s endpoint=%s", c.MSPID(), c.Address())
-	res, err := lifecycle.NewClient(c.peer.Connection()).CheckCommitReadiness(ctx, req)
+	res, err := lifecycle.NewClient(c.peer.Connection(), req.ChannelID).CheckCommitReadiness(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("remote orchestrator %s readiness: %w", c.MSPID(), err)
 	}
@@ -167,7 +167,7 @@ func (c *OrchestratorContact) Commit(ctx context.Context, req *lifecycle.SignedR
 		return nil, errors.New("remote orchestrator contact is not configured")
 	}
 	c.logger.Infof("requesting remote lifecycle commit msp=%s endpoint=%s", c.MSPID(), c.Address())
-	res, err := lifecycle.NewClient(c.peer.Connection()).Commit(ctx, req)
+	res, err := lifecycle.NewClient(c.peer.Connection(), req.ChannelID).Commit(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("remote orchestrator %s commit: %w", c.MSPID(), err)
 	}
@@ -181,7 +181,7 @@ func (c *OrchestratorContact) MarkInitialized(ctx context.Context, req *lifecycl
 		return nil, errors.New("remote orchestrator contact is not configured")
 	}
 	c.logger.Infof("requesting remote lifecycle mark initialized msp=%s endpoint=%s", c.MSPID(), c.Address())
-	res, err := lifecycle.NewClient(c.peer.Connection()).MarkInitialized(ctx, req)
+	res, err := lifecycle.NewClient(c.peer.Connection(), req.ChannelID).MarkInitialized(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("remote orchestrator %s mark initialized: %w", c.MSPID(), err)
 	}

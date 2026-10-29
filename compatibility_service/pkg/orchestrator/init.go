@@ -88,7 +88,7 @@ func (s *Service) markInitializedAfterCommit(ctx context.Context, def lifecycle.
 	s.logger.Infof("lifecycle initialized locally name=%s version=%s sequence=%d initialized=%t",
 		def.Name, def.Version, def.Sequence, committed.Initialized)
 
-	req, err := lifecycle.SignRequest(s.signer, lifecycle.MarkInitializedRequest{Definition: def})
+	req, err := lifecycle.SignInternalRequest(s.signer, s.cfg.ChannelID, lifecycle.MarkInitializedRequest{Definition: def})
 	if err != nil {
 		return fmt.Errorf("sign lifecycle initialized request: %w", err)
 	}

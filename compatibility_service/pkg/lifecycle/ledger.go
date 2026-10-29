@@ -37,6 +37,12 @@ type LedgerCommitter interface {
 	CommitLifecycleDefinition(context.Context, ChaincodeDefinition) (LedgerCommitResult, error)
 }
 
+// LedgerBackend also verifies shared state before an RPC updates a local mirror.
+type LedgerBackend interface {
+	LedgerCommitter
+	ReadLifecycleDefinition(context.Context, ChaincodeDefinition) (LedgerDefinition, bool, error)
+}
+
 // LedgerDefinition is the deterministic shared value stored in Fabric-X state.
 type LedgerDefinition struct {
 	CCID         string `json:"ccid"`

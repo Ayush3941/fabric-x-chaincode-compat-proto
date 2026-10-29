@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+channel-id: channelqc4
+
 identity:
   msp-id: org-0
   msp-dir: ../artifacts/peerOrganizations/peer-org-0/users/Admin@peer-org-0/msp

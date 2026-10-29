@@ -18,6 +18,23 @@ proposal-auth:
       namespace: "*"
       policy: "OR('org-0.member','org-1.member')"
 
+# Lifecycle trust reuses proposal-auth.msps; permissions are independent.
+lifecycle-auth:
+  policies:
+    install: "OR('org-0.admin')"
+    queryinstalled: "OR('org-0.admin')"
+    approveformyorg: "OR('org-0.admin')"
+    checkcommitreadiness: "OR('org-0.member','org-1.member')"
+    commit: "OR('org-0.member','org-1.member')"
+    querycommitted: "OR('org-0.member','org-1.member')"
+  orchestrators:
+    - msp-id: org-0
+      cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0.peer-org-0/msp/signcerts/orchestrator0.peer-org-0-cert.pem
+    - msp-id: org-0
+      cert-path: ../artifacts/peerOrganizations/peer-org-0/peers/orchestrator0b.peer-org-0/msp/signcerts/orchestrator0b.peer-org-0-cert.pem
+    - msp-id: org-1
+      cert-path: ../artifacts/peerOrganizations/peer-org-1/peers/orchestrator1.peer-org-1/msp/signcerts/orchestrator1.peer-org-1-cert.pem
+
 server:
   endpoint:
     host: 127.0.0.1

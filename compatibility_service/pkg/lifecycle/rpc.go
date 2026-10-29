@@ -4,24 +4,13 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/asn1"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
-	"fmt"
-	"math/big"
 
-	"github.com/hyperledger/fabric-protos-go-apiv2/msp"
 	sdk "github.com/hyperledger/fabric-x-sdk"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcencoding "google.golang.org/grpc/encoding"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -45,13 +34,6 @@ func (jsonCodec) Marshal(v any) ([]byte, error) {
 
 func (jsonCodec) Unmarshal(data []byte, v any) error {
 	return json.Unmarshal(data, v)
-}
-
-// SignedRequest is the signed lifecycle request envelope.
-type SignedRequest struct {
-	Payload   []byte `json:"payload"`
-	Creator   []byte `json:"creator"`
-	Signature []byte `json:"signature"`
 }
 
 // InstallRequest carries one lifecycle package archive.
@@ -135,27 +117,6 @@ type QueryCommittedResponse struct {
 	Definitions []CommittedDefinition `json:"definitions"`
 }
 
-// SignRequest signs a lifecycle payload with an MSP identity.
-func SignRequest(signer sdk.Signer, payload any) (*SignedRequest, error) {
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal lifecycle payload: %w", err)
-	}
-	creator, err := signer.Serialize()
-	if err != nil {
-		return nil, fmt.Errorf("serialize creator: %w", err)
-	}
-	signature, err := signer.Sign(payloadBytes)
-	if err != nil {
-		return nil, fmt.Errorf("sign lifecycle payload: %w", err)
-	}
-	return &SignedRequest{
-		Payload:   payloadBytes,
-		Creator:   creator,
-		Signature: signature,
-	}, nil
-}
-
 // LifecycleServer is the gRPC lifecycle API.
 type LifecycleServer interface {
 	Install(context.Context, *SignedRequest) (*InstallResponse, error)
@@ -198,29 +159,43 @@ func (p staticRemotePeerProvider) RemotePeers(context.Context, RemotePeerRequest
 	return append([]RemotePeer(nil), p.remotes...), nil
 }
 
-// Server implements lifecycle install/queryinstalled for one orchestrator.
+// ServerConfig connects lifecycle admission to the shared MSP verifier.
+type ServerConfig struct {
+	ChannelID string
+	MSPID     string
+	Auth      *Authorizer
+	Signer    sdk.Signer
+}
+
+// Server implements the lifecycle API for one Orchestrator.
 type Server struct {
+	channelID       string
+	auth            *Authorizer
+	signer          sdk.Signer
 	store           *Store
 	mspID           string
 	logger          sdk.Logger
-	ledgerCommitter LedgerCommitter
+	ledgerCommitter LedgerBackend
 	remotes         RemotePeerProvider
 }
 
 // NewServer creates the lifecycle service for a running orchestrator.
-func NewServer(store *Store, mspID string, logger sdk.Logger, ledgerCommitter LedgerCommitter, remotes ...RemotePeer) *Server {
-	return NewServerWithRemoteProvider(store, mspID, logger, ledgerCommitter, staticRemotePeerProvider{remotes: remotes})
+func NewServer(store *Store, cfg ServerConfig, logger sdk.Logger, ledgerCommitter LedgerBackend, remotes ...RemotePeer) *Server {
+	return NewServerWithRemoteProvider(store, cfg, logger, ledgerCommitter, staticRemotePeerProvider{remotes: remotes})
 }
 
 // NewServerWithRemoteProvider creates the lifecycle service with a dynamic
 // remote peer provider.
-func NewServerWithRemoteProvider(store *Store, mspID string, logger sdk.Logger, ledgerCommitter LedgerCommitter, remotes RemotePeerProvider) *Server {
+func NewServerWithRemoteProvider(store *Store, cfg ServerConfig, logger sdk.Logger, ledgerCommitter LedgerBackend, remotes RemotePeerProvider) *Server {
 	if logger == nil {
 		logger = sdk.NoOpLogger{}
 	}
 	return &Server{
 		store:           store,
-		mspID:           mspID,
+		mspID:           cfg.MSPID,
+		channelID:       cfg.ChannelID,
+		auth:            cfg.Auth,
+		signer:          cfg.Signer,
 		logger:          logger,
 		ledgerCommitter: ledgerCommitter,
 		remotes:         remotes,
@@ -248,12 +223,17 @@ func RegisterLifecycleServer(registrar grpc.ServiceRegistrar, srv LifecycleServe
 
 // Client is a lightweight lifecycle gRPC client.
 type Client struct {
-	conn grpc.ClientConnInterface
+	conn      grpc.ClientConnInterface
+	channelID string
 }
 
 // NewClient creates a lifecycle client over an existing gRPC connection.
-func NewClient(conn grpc.ClientConnInterface) *Client {
-	return &Client{conn: conn}
+func NewClient(conn grpc.ClientConnInterface, channelID string) *Client {
+	return &Client{conn: conn, channelID: channelID}
+}
+
+func (c *Client) SignRequest(signer sdk.Signer, payload any) (*SignedRequest, error) {
+	return SignRequest(signer, c.channelID, payload)
 }
 
 // Install sends a signed install request.
@@ -308,7 +288,7 @@ func (c *Client) QueryCommitted(ctx context.Context, req *SignedRequest) (*Query
 // Install validates and stores a CCAAS lifecycle package in this process.
 func (s *Server) Install(ctx context.Context, req *SignedRequest) (*InstallResponse, error) {
 	var payload InstallRequest
-	mspID, err := s.verifyAndUnmarshal(req, &payload)
+	mspID, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +325,7 @@ func (s *Server) Install(ctx context.Context, req *SignedRequest) (*InstallRespo
 
 // QueryInstalled returns packages stored by this running process.
 func (s *Server) QueryInstalled(ctx context.Context, req *SignedRequest) (*QueryInstalledResponse, error) {
-	mspID, err := s.verifyAndUnmarshal(req, &QueryInstalledRequest{})
+	mspID, err := s.verifyAndUnmarshal(ctx, req, &QueryInstalledRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +348,7 @@ func (s *Server) QueryInstalled(ctx context.Context, req *SignedRequest) (*Query
 // this organization's approval.
 func (s *Server) ApproveForMyOrg(ctx context.Context, req *SignedRequest) (*ApproveForMyOrgResponse, error) {
 	var payload ApproveForMyOrgRequest
-	mspID, err := s.verifyAndUnmarshal(req, &payload)
+	mspID, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
@@ -381,15 +361,15 @@ func (s *Server) ApproveForMyOrg(ctx context.Context, req *SignedRequest) (*Appr
 	return &ApproveForMyOrgResponse{Approval: approval}, nil
 }
 
-// CheckCommitReadiness checks local approval and, unless marked local-only,
+// CheckCommitReadiness checks local approval and, unless signed as internal,
 // asks configured remote orchestrators for their local readiness too.
 func (s *Server) CheckCommitReadiness(ctx context.Context, req *SignedRequest) (*CheckCommitReadinessResponse, error) {
 	var payload CheckCommitReadinessRequest
-	callerMSP, err := s.verifyAndUnmarshalAnyMSP(req, &payload)
+	callerMSP, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
-	approvals, err := s.checkCommitReadiness(ctx, req, payload.Definition, !localOnly(ctx))
+	approvals, err := s.checkCommitReadiness(ctx, payload.Definition, !req.Internal)
 	if err != nil {
 		return nil, err
 	}
@@ -403,12 +383,18 @@ func (s *Server) CheckCommitReadiness(ctx context.Context, req *SignedRequest) (
 // definition to configured remote orchestrators.
 func (s *Server) Commit(ctx context.Context, req *SignedRequest) (*CommitResponse, error) {
 	var payload CommitRequest
-	callerMSP, err := s.verifyAndUnmarshalAnyMSP(req, &payload)
+	callerMSP, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
-	aggregate := !localOnly(ctx)
-	approvals, err := s.checkCommitReadiness(ctx, req, payload.Definition, aggregate)
+	if req.Internal {
+		committed, err := s.applyLedgerDefinition(ctx, payload.Definition, false)
+		if err != nil {
+			return nil, err
+		}
+		return &CommitResponse{Definition: committed}, nil
+	}
+	approvals, err := s.checkCommitReadiness(ctx, payload.Definition, true)
 	if err != nil {
 		return nil, err
 	}
@@ -421,35 +407,33 @@ func (s *Server) Commit(ctx context.Context, req *SignedRequest) (*CommitRespons
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 
-	var ledger LedgerCommitResult
-	if aggregate {
-		if s.ledgerCommitter == nil {
-			return nil, status.Error(codes.FailedPrecondition, "lifecycle ledger committer is not configured")
-		}
-		ledger, err = s.ledgerCommitter.CommitLifecycleDefinition(ctx, payload.Definition)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "commit lifecycle ledger transaction: %s", err)
-		}
+	if s.ledgerCommitter == nil {
+		return nil, status.Error(codes.FailedPrecondition, "lifecycle ledger committer is not configured")
+	}
+	ledger, err := s.ledgerCommitter.CommitLifecycleDefinition(ctx, payload.Definition)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "commit lifecycle ledger transaction: %s", err)
 	}
 
-	committed, err := s.store.CommitDefinition(ctx, payload.Definition, s.mspID)
+	committed, err := s.applyLedgerDefinition(ctx, payload.Definition, false)
 	if err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return nil, err
 	}
-	if aggregate {
-		remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: payload.Definition})
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "resolve remote lifecycle peers: %s", err)
-		}
-		remoteCtx := metadata.AppendToOutgoingContext(ctx, localOnlyMetadata, "true")
-		for _, remote := range remotes {
-			if _, err := remote.Commit(remoteCtx, req); err != nil {
-				return nil, status.Errorf(codes.Internal, "remote commit %s: %s", remote.MSPID(), err)
-			}
+	remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: payload.Definition})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "resolve remote lifecycle peers: %s", err)
+	}
+	internal, err := SignInternalRequest(s.signer, s.channelID, CommitRequest{Definition: payload.Definition})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	for _, remote := range remotes {
+		if _, err := remote.Commit(ctx, internal); err != nil {
+			return nil, status.Errorf(codes.Internal, "remote commit %s: %s", remote.MSPID(), err)
 		}
 	}
 	s.logger.Infof("lifecycle commit name=%s version=%s sequence=%d caller_msp=%s local_msp=%s propagated=%t",
-		payload.Definition.Name, payload.Definition.Version, payload.Definition.Sequence, callerMSP, s.mspID, aggregate)
+		payload.Definition.Name, payload.Definition.Version, payload.Definition.Sequence, callerMSP, s.mspID, true)
 	return &CommitResponse{Definition: committed, Approvals: approvals, Ledger: ledger}, nil
 }
 
@@ -457,13 +441,13 @@ func (s *Server) Commit(ctx context.Context, req *SignedRequest) (*CommitRespons
 // after the init transaction has committed.
 func (s *Server) MarkInitialized(ctx context.Context, req *SignedRequest) (*MarkInitializedResponse, error) {
 	var payload MarkInitializedRequest
-	callerMSP, err := s.verifyAndUnmarshalAnyMSP(req, &payload)
+	callerMSP, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
-	committed, err := s.store.MarkInitialized(ctx, payload.Definition, s.mspID)
+	committed, err := s.applyLedgerDefinition(ctx, payload.Definition, true)
 	if err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return nil, err
 	}
 	s.logger.Infof("lifecycle markinitialized name=%s version=%s sequence=%d caller_msp=%s local_msp=%s initialized=%t",
 		payload.Definition.Name, payload.Definition.Version, payload.Definition.Sequence, callerMSP, s.mspID, committed.Initialized)
@@ -473,7 +457,7 @@ func (s *Server) MarkInitialized(ctx context.Context, req *SignedRequest) (*Mark
 // QueryCommitted returns active committed definitions known by this process.
 func (s *Server) QueryCommitted(ctx context.Context, req *SignedRequest) (*QueryCommittedResponse, error) {
 	var payload QueryCommittedRequest
-	mspID, err := s.verifyAndUnmarshalAnyMSP(req, &payload)
+	mspID, err := s.verifyAndUnmarshal(ctx, req, &payload)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +470,7 @@ func (s *Server) QueryCommitted(ctx context.Context, req *SignedRequest) (*Query
 	return &QueryCommittedResponse{Definitions: definitions}, nil
 }
 
-func (s *Server) checkCommitReadiness(ctx context.Context, signedReq *SignedRequest, def ChaincodeDefinition, aggregate bool) (map[string]bool, error) {
+func (s *Server) checkCommitReadiness(ctx context.Context, def ChaincodeDefinition, aggregate bool) (map[string]bool, error) {
 	approved, err := s.store.HasMatchingApproval(ctx, def, s.mspID)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -499,9 +483,12 @@ func (s *Server) checkCommitReadiness(ctx context.Context, signedReq *SignedRequ
 	if err != nil {
 		return nil, err
 	}
-	remoteCtx := metadata.AppendToOutgoingContext(ctx, localOnlyMetadata, "true")
+	internal, err := SignInternalRequest(s.signer, s.channelID, CheckCommitReadinessRequest{Definition: def})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 	for _, remote := range remotes {
-		res, err := remote.CheckCommitReadiness(remoteCtx, signedReq)
+		res, err := remote.CheckCommitReadiness(ctx, internal)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "remote readiness %s: %s", remote.MSPID(), err)
 		}
@@ -519,95 +506,40 @@ func (s *Server) remotePeers(ctx context.Context, req RemotePeerRequest) ([]Remo
 	return s.remotes.RemotePeers(ctx, req)
 }
 
-func (s *Server) verifyAndUnmarshal(req *SignedRequest, payload any) (string, error) {
-	mspID, err := verifySignedRequest(req, s.mspID)
+// Admission always authenticates before decoding a payload or accessing state.
+func (s *Server) verifyAndUnmarshal(ctx context.Context, req *SignedRequest, payload any) (string, error) {
+	operation, err := operationForPayload(payload)
 	if err != nil {
-		return "", status.Error(codes.PermissionDenied, err.Error())
-	}
-	if err := json.Unmarshal(req.Payload, payload); err != nil {
 		return "", status.Error(codes.InvalidArgument, err.Error())
 	}
-	return mspID, nil
-}
-
-func (s *Server) verifyAndUnmarshalAnyMSP(req *SignedRequest, payload any) (string, error) {
-	mspID, err := verifySignedRequest(req, "")
+	mspID, err := s.auth.check(ctx, req, operation)
 	if err != nil {
-		return "", status.Error(codes.PermissionDenied, err.Error())
-	}
-	if err := json.Unmarshal(req.Payload, payload); err != nil {
-		return "", status.Error(codes.InvalidArgument, err.Error())
-	}
-	return mspID, nil
-}
-
-func localOnly(ctx context.Context) bool {
-	values := metadata.ValueFromIncomingContext(ctx, localOnlyMetadata)
-	for _, value := range values {
-		if value == "true" {
-			return true
-		}
-	}
-	return false
-}
-
-func verifySignedRequest(req *SignedRequest, expectedMSP string) (string, error) {
-	if req == nil {
-		return "", errors.New("missing lifecycle request")
-	}
-	if len(req.Payload) == 0 {
-		return "", errors.New("missing lifecycle payload")
-	}
-	if len(req.Creator) == 0 {
-		return "", errors.New("missing lifecycle creator")
-	}
-	if len(req.Signature) == 0 {
-		return "", errors.New("missing lifecycle signature")
-	}
-
-	creator := &msp.SerializedIdentity{}
-	if err := proto.Unmarshal(req.Creator, creator); err != nil {
-		return "", fmt.Errorf("decode creator: %w", err)
-	}
-	if expectedMSP != "" && creator.Mspid != expectedMSP {
-		return "", fmt.Errorf("caller MSP %q does not match orchestrator MSP %q", creator.Mspid, expectedMSP)
-	}
-	if err := verifyECDSASignature(creator.IdBytes, req.Payload, req.Signature); err != nil {
 		return "", err
 	}
-	return creator.Mspid, nil
-}
-
-type ecdsaSignature struct {
-	R *big.Int
-	S *big.Int
-}
-
-func verifyECDSASignature(certPEM, payload, signature []byte) error {
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return errors.New("creator certificate is not PEM")
+	if err := json.Unmarshal(req.Payload, payload); err != nil {
+		return "", status.Error(codes.InvalidArgument, err.Error())
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	return mspID, nil
+}
+
+// Internal RPCs can mirror ledger-confirmed state; they cannot assert that an
+// uncommitted definition or initialization has become active.
+func (s *Server) applyLedgerDefinition(ctx context.Context, def ChaincodeDefinition, initialized bool) (CommittedDefinition, error) {
+	if s.ledgerCommitter == nil {
+		return CommittedDefinition{}, status.Error(codes.FailedPrecondition, "lifecycle ledger backend is required")
+	}
+	ledger, ok, err := s.ledgerCommitter.ReadLifecycleDefinition(ctx, def)
 	if err != nil {
-		return fmt.Errorf("parse creator certificate: %w", err)
+		return CommittedDefinition{}, status.Errorf(codes.Unavailable, "read lifecycle ledger: %v", err)
 	}
-	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return errors.New("creator certificate is not ECDSA")
+	if !ok || ChaincodeDefinitionFromLedger(ledger) != def || ledger.CCID != DefinitionCCID(def) || (initialized && !ledger.Initialized) {
+		return CommittedDefinition{}, status.Error(codes.FailedPrecondition, "lifecycle update does not match committed ledger state")
 	}
-	var sig ecdsaSignature
-	if _, err := asn1.Unmarshal(signature, &sig); err != nil {
-		return fmt.Errorf("decode signature: %w", err)
+	committed, err := s.store.UpsertCommittedFromLedger(ctx, def, ledger.Initialized)
+	if err != nil {
+		return CommittedDefinition{}, status.Error(codes.Internal, err.Error())
 	}
-	if sig.R == nil || sig.S == nil {
-		return errors.New("signature missing ECDSA values")
-	}
-	digest := sha256.Sum256(payload)
-	if !ecdsa.Verify(pub, digest[:], sig.R, sig.S) {
-		return errors.New("signature verification failed")
-	}
-	return nil
+	return committed, nil
 }
 
 func lifecycleInstallHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {

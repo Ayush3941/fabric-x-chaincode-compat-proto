@@ -43,6 +43,10 @@ client signed proposal
 The original client creator, nonce, signed proposal, timestamp, transient data,
 chaincode name, and chaincode version are preserved into the helper/shim path.
 
+Proposal admission and lifecycle RPCs share MSP verification through
+`pkg/auth`; each keeps its own operation policies. Lifecycle configuration and
+signed coordination are described in [lifecycle permissions](lifecycle.md#authentication-and-permissions).
+
 ## Proposal Authentication
 
 Every public `ProcessProposal` request is checked before lifecycle lookup,

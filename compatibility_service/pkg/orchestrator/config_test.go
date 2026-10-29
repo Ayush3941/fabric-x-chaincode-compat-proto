@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cfgpkg "compatibility_service/pkg/config"
+	"compatibility_service/pkg/lifecycle"
 	"github.com/hyperledger/fabric-x-committer/utils/connection"
 	"github.com/hyperledger/fabric-x-committer/utils/serve"
 )
@@ -89,5 +90,23 @@ func validConfigWithTimeouts(requestTimeout, finalityTimeout time.Duration) Conf
 			MSPs:  []ProposalMSPConfig{{MSPID: "org-0", MSPDir: "msp"}},
 			Rules: []ProposalAuthorizationRule{{Chaincode: "*", Namespace: "*", Policy: "OR('org-0.member')"}},
 		},
+		LifecycleAuth: lifecycle.AuthConfig{
+			Policies: map[string]string{
+				"install": "OR('org-0.admin')", "queryinstalled": "OR('org-0.admin')", "approveformyorg": "OR('org-0.admin')",
+				"commit": "OR('org-0.member')", "checkcommitreadiness": "OR('org-0.member')", "querycommitted": "OR('org-0.member')",
+			},
+			Orchestrators: []lifecycle.OrchestratorIdentity{{MSPID: "org-0", CertPath: "orchestrator-cert.pem"}},
+		},
+	}
+}
+
+func TestValidateRequiresLifecycleAuthorization(t *testing.T) {
+	cfg := validConfigWithTimeouts(45*time.Second, 20*time.Second)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.LifecycleAuth = lifecycle.AuthConfig{}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "lifecycle-auth") {
+		t.Fatalf("unconfigured lifecycle authorization did not fail closed: %v", err)
 	}
 }

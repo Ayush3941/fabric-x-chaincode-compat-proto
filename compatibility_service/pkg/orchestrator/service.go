@@ -67,6 +67,7 @@ type Config struct {
 	RemoteOrgs         []RemoteOrchestratorConfig       `mapstructure:"remote-orchestrators"`
 	RemoteResolver     RemoteOrchestratorResolverConfig `mapstructure:"remote-orchestrator-resolver"`
 	ProposalAuth       ProposalAuthConfig               `mapstructure:"proposal-auth"`
+	LifecycleAuth      lifecycle.AuthConfig             `mapstructure:"lifecycle-auth"`
 	WaitAfterSubmit    time.Duration                    `mapstructure:"wait-after-submit"`
 	RequestTimeout     time.Duration                    `mapstructure:"request-timeout"`
 	FinalityTimeout    time.Duration                    `mapstructure:"finality-timeout"`
@@ -151,21 +152,22 @@ type transactionSubmitter interface {
 
 // Service is the orchestrator process.
 type Service struct {
-	cfg          Config
-	signer       sdk.Signer
-	helper       *helper.Service
-	queryPeer    *network.Peer
-	queryService committerpb.QueryServiceClient
-	policies     *namespacePolicyResolver
-	submitter    transactionSubmitter
-	notifier     *network.Peer
-	notify       committerpb.NotifierClient
-	idempotency  *idempotencyStore
-	lifecycle    *lifecycle.Store
-	resolver     chaincodeConnectionResolver
-	remotes      remoteOrchestratorResolver
-	proposalAuth *proposalVerifier
-	logger       sdk.Logger
+	cfg           Config
+	signer        sdk.Signer
+	helper        *helper.Service
+	queryPeer     *network.Peer
+	queryService  committerpb.QueryServiceClient
+	policies      *namespacePolicyResolver
+	submitter     transactionSubmitter
+	notifier      *network.Peer
+	notify        committerpb.NotifierClient
+	idempotency   *idempotencyStore
+	lifecycle     *lifecycle.Store
+	resolver      chaincodeConnectionResolver
+	remotes       remoteOrchestratorResolver
+	proposalAuth  *proposalVerifier
+	lifecycleAuth *lifecycle.Authorizer
+	logger        sdk.Logger
 }
 
 // Loggers separates the deployable service logs by logical component.
@@ -201,6 +203,17 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
 	if err != nil {
 		return nil, fmt.Errorf("load identity: %w", err)
+	}
+	lifecycleAuth, err := lifecycle.NewAuthorizer(proposalAuth.trust, cfg.ChannelID, cfg.Identity.MspID, cfg.LifecycleAuth)
+	if err != nil {
+		return nil, fmt.Errorf("configure lifecycle authorization: %w", err)
+	}
+	creator, err := signer.Serialize()
+	if err != nil {
+		return nil, err
+	}
+	if err := lifecycleAuth.ValidateOrchestrator(creator); err != nil {
+		return nil, err
 	}
 
 	queryPeer, err := network.NewPeer(cfg.QueryService.ToPeerConf())
@@ -297,21 +310,22 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 	}
 
 	svc := &Service{
-		cfg:          cfg,
-		signer:       signer,
-		helper:       helper,
-		queryPeer:    queryPeer,
-		queryService: queryService,
-		policies:     policies,
-		submitter:    submitter,
-		notifier:     notifier,
-		notify:       notify,
-		idempotency:  newIdempotencyStore(),
-		lifecycle:    lifecycleStore,
-		resolver:     resolver,
-		remotes:      remoteResolver,
-		proposalAuth: proposalAuth,
-		logger:       orchestratorLogger,
+		cfg:           cfg,
+		signer:        signer,
+		helper:        helper,
+		queryPeer:     queryPeer,
+		queryService:  queryService,
+		policies:      policies,
+		submitter:     submitter,
+		notifier:      notifier,
+		notify:        notify,
+		idempotency:   newIdempotencyStore(),
+		lifecycle:     lifecycleStore,
+		resolver:      resolver,
+		remotes:       remoteResolver,
+		proposalAuth:  proposalAuth,
+		lifecycleAuth: lifecycleAuth,
+		logger:        orchestratorLogger,
 	}
 	if err := svc.syncLifecycleFromLedger(ctx); err != nil {
 		svc.Close() //nolint:errcheck
@@ -327,6 +341,9 @@ func NewWithLoggers(ctx context.Context, cfg Config, loggers Loggers) (*Service,
 func (cfg Config) Validate() error {
 	var errs []error
 	if err := cfg.ProposalAuth.validate(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := cfg.LifecycleAuth.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 	if cfg.ChannelID == "" {
@@ -391,7 +408,8 @@ func (s *Service) Run(ctx context.Context) error {
 // RegisterService implements serve.Registerer.
 func (s *Service) RegisterService(servers serve.Servers) {
 	peer.RegisterEndorserServer(servers.GRPC, s)
-	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServerWithRemoteProvider(s.lifecycle, s.cfg.Identity.MspID, s.logger, s, s))
+	lifecycle.RegisterLifecycleServer(servers.GRPC, lifecycle.NewServerWithRemoteProvider(s.lifecycle,
+		lifecycle.ServerConfig{ChannelID: s.cfg.ChannelID, MSPID: s.cfg.Identity.MspID, Auth: s.lifecycleAuth, Signer: s.signer}, s.logger, s, s))
 	healthgrpc.RegisterHealthServer(servers.GRPC, health.NewServer())
 	reflection.Register(servers.GRPC)
 	s.logger.Infof("orchestrator gRPC ProcessProposal and lifecycle services registered")

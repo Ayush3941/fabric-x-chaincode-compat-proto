@@ -43,6 +43,16 @@ func (s *Service) MarkLifecycleInitialized(ctx context.Context, def lifecycle.Ch
 	return s.submitLifecycleDefinition(ctx, def, true)
 }
 
+// ReadLifecycleDefinition verifies local lifecycle updates against committed state.
+func (s *Service) ReadLifecycleDefinition(ctx context.Context, def lifecycle.ChaincodeDefinition) (lifecycle.LedgerDefinition, bool, error) {
+	value, _, ok, err := s.lifecycleRow(ctx, s.cfg.lifecycleNamespace(), lifecycle.LedgerKey(def))
+	if err != nil || !ok {
+		return lifecycle.LedgerDefinition{}, ok, err
+	}
+	record, err := lifecycle.UnmarshalLedgerDefinition(value)
+	return record, true, err
+}
+
 func (s *Service) submitLifecycleDefinition(ctx context.Context, def lifecycle.ChaincodeDefinition, initialized bool) (lifecycle.LedgerCommitResult, error) {
 	namespace := s.cfg.lifecycleNamespace()
 	key := lifecycle.LedgerKey(def)

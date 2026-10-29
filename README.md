@@ -128,6 +128,12 @@ demo chaincodes/namespaces. Each remote endorser verifies the original client
 independently. See [proposal authentication](docs/architecture.md#proposal-authentication)
 for narrower permissions and the distinction from mTLS.
 
+Lifecycle permissions use the same MSP trust with a separate `lifecycle-auth`
+configuration. The supplied admin identities authorize installation and
+organizational approval; commitment and queries use their configured policies.
+The sample configurations already include these settings. See
+[lifecycle permissions](docs/lifecycle.md#authentication-and-permissions).
+
 Use five service terminals and one client terminal. Run each service block from
 the repository root.
 

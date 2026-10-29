@@ -19,6 +19,67 @@ Admin identity comes from `sampleconfig/admin-org0.yaml` or
 `sampleconfig/admin-org1.yaml`. The target orchestrator is selected with
 `--host`.
 
+## Authentication and Permissions
+
+Lifecycle RPCs authenticate enrollment identities using the same public MSPs in
+`proposal-auth.msps` as transaction proposals. Certificate trust, configured
+revocation data, certificate validity, and request signatures are checked before
+payload processing or state access. TLS connection authentication is separate.
+
+`lifecycle-auth.policies` configures the caller permission for each operation.
+The sample configuration follows Fabric's default caller-policy split:
+
+| Operation | Sample caller permission |
+|---|---|
+| `install`, `queryinstalled`, `approveformyorg` | Administrator of the target Orchestrator's organization |
+| `checkcommitreadiness`, `commit`, `querycommitted` | Member of either configured demo organization, representing the writer policy |
+| Internal readiness, definition propagation, `markinitialized` | Explicitly configured Orchestrator enrollment identities |
+
+A writer's permission to request commitment does not replace administrator
+approvals or the Fabric-X lifecycle namespace's endorsement policy. Installation,
+installed-package queries, and organizational approval also require the caller's
+verified MSP to match the target organization.
+
+For example, org0 uses these policies:
+
+```yaml
+lifecycle-auth:
+  policies:
+    install: "OR('org-0.admin')"
+    queryinstalled: "OR('org-0.admin')"
+    approveformyorg: "OR('org-0.admin')"
+    checkcommitreadiness: "OR('org-0.member','org-1.member')"
+    commit: "OR('org-0.member','org-1.member')"
+    querycommitted: "OR('org-0.member','org-1.member')"
+```
+
+The same section also requires `orchestrators`, a list of `msp-id` and
+`cert-path` entries pointing to permitted public enrollment certificates. See
+[the complete org0 configuration](../compatibility_service/sampleconfig/orchestrator.yaml).
+These identities must validate under the shared MSP trust configuration. The
+local signing identity must be listed too. Sharing an MSP does not automatically
+grant internal coordination permission. Trust, policies, and permitted
+identities are loaded at startup; restart after changing them.
+
+Lifecycle client configurations include `channel-id`, as shown in the existing
+admin configurations. The signed request binds a protocol version, caller
+identity, channel, operation, internal-processing flag, timestamp, nonce, and
+payload. Requests must be within a five-minute clock window. This bounds request
+age; it is not a durable replay-detection store. Payload-only legacy signatures
+are rejected. Rebuild the client and server together; CLI command syntax stays
+the same.
+
+For coordination, the initiating Orchestrator signs a new internal request for
+the specific remote operation after checking the public caller's permissions.
+Internal definition and initialization updates read committed lifecycle state
+before updating the local mirror. An internal caller cannot activate a
+nonexistent definition or an unconfirmed initialized marker. The legacy
+`x-compat-lifecycle-local-only` metadata can only match the signed internal flag;
+it cannot grant internal permissions or bypass ledger submission.
+
+Missing permission rules, unknown operations, invalid policies, untrusted
+Orchestrator certificates, and an unlisted local signer prevent startup.
+
 ## Package
 
 External chaincode packages use the Fabric CCAAS package shape:

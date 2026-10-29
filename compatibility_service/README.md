@@ -126,6 +126,12 @@ These configure enrollment MSP trust and invocation permissions, independently
 of connection TLS. See [proposal authentication](../docs/architecture.md#proposal-authentication)
 for the configuration and rejection behavior.
 
+Lifecycle RPCs also require `lifecycle-auth.policies` and
+`lifecycle-auth.orchestrators`, using the same trusted MSPs. The admin client
+configurations include `channel-id` for operation-bound request signatures.
+Rebuild both client and server when upgrading from payload-only lifecycle
+signatures. See [lifecycle permissions](../docs/lifecycle.md#authentication-and-permissions).
+
 ## Tests
 
 ```bash

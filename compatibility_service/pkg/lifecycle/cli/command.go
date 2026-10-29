@@ -19,6 +19,8 @@ import (
 )
 
 type clientConfig struct {
+	ChannelID    string                 `mapstructure:"channel-id"`
+	Protocol     string                 `mapstructure:"protocol"`
 	Identity     *config.IdentityConfig `mapstructure:"identity"`
 	Orchestrator *config.ClientConfig   `mapstructure:"orchestrator"`
 }
@@ -81,7 +83,7 @@ func newInstallCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.InstallRequest{Package: packageBytes})
+			req, err := client.SignRequest(signer, lifecycle.InstallRequest{Package: packageBytes})
 			if err != nil {
 				return err
 			}
@@ -108,7 +110,7 @@ func newQueryInstalledCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.QueryInstalledRequest{})
+			req, err := client.SignRequest(signer, lifecycle.QueryInstalledRequest{})
 			if err != nil {
 				return err
 			}
@@ -146,7 +148,7 @@ func newApproveForMyOrgCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.ApproveForMyOrgRequest{
+			req, err := client.SignRequest(signer, lifecycle.ApproveForMyOrgRequest{
 				Definition: def,
 				PackageID:  packageID,
 			})
@@ -180,7 +182,7 @@ func newCheckCommitReadinessCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.CheckCommitReadinessRequest{Definition: def})
+			req, err := client.SignRequest(signer, lifecycle.CheckCommitReadinessRequest{Definition: def})
 			if err != nil {
 				return err
 			}
@@ -209,7 +211,7 @@ func newCommitCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.CommitRequest{Definition: def})
+			req, err := client.SignRequest(signer, lifecycle.CommitRequest{Definition: def})
 			if err != nil {
 				return err
 			}
@@ -246,7 +248,7 @@ func newQueryCommittedCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := lifecycle.SignRequest(signer, lifecycle.QueryCommittedRequest{
+			req, err := client.SignRequest(signer, lifecycle.QueryCommittedRequest{
 				Name:    name,
 				Version: version,
 			})
@@ -301,7 +303,7 @@ func lifecycleClient(cmd *cobra.Command) (*lifecycle.Client, func(), identity.Si
 	closeClient := func() {
 		peer.Close() //nolint:errcheck
 	}
-	return lifecycle.NewClient(peer.Connection()), closeClient, signer, nil
+	return lifecycle.NewClient(peer.Connection(), cfg.ChannelID), closeClient, signer, nil
 }
 
 func loadClientConfig(cmd *cobra.Command) (clientConfig, error) {
@@ -322,6 +324,9 @@ func loadClientConfig(cmd *cobra.Command) (clientConfig, error) {
 	var cfg clientConfig
 	if err := parser.EnhancedExactUnmarshal(&cfg); err != nil {
 		return clientConfig{}, fmt.Errorf("invalid config: %w", err)
+	}
+	if cfg.ChannelID == "" {
+		return clientConfig{}, fmt.Errorf("channel-id is required")
 	}
 	if cfg.Identity == nil {
 		return clientConfig{}, fmt.Errorf("identity is required")
