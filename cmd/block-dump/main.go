@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -255,7 +256,16 @@ func dumpFabricXTx(data []byte, txID string) {
 			metadata.EventName,
 			renderBytes(metadata.Event),
 		)
-	} else if len(tx.Metadata) > 1 && len(tx.Metadata[1]) > 0 {
+	}
+	for index, record := range tx.Metadata {
+		if index == 0 || !json.Valid(record) {
+			continue
+		}
+		// SDK metadata entries after index zero may hold application metadata,
+		// including the signed Gateway binding and readable chaincode identity.
+		fmt.Printf("      metadata[%d]=%s\n", index, renderBytes(record))
+	}
+	if len(metadata.Event) == 0 && metadata.EventName == "" && len(tx.Metadata) > 1 && len(tx.Metadata[1]) > 0 && !json.Valid(tx.Metadata[1]) {
 		var event peer.ChaincodeEvent
 		if err := proto.Unmarshal(tx.Metadata[1], &event); err != nil {
 			fmt.Printf("      event decode failed: %v\n", err)

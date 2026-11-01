@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestApproveForMyOrgRequiresIncreasingSequence(t *testing.T) {
+func TestApprovalsAreScopedToDefinitionSequence(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	installTestPackage(t, ctx, store, "pkg1", "127.0.0.1:9999")
@@ -27,8 +27,8 @@ func TestApproveForMyOrgRequiresIncreasingSequence(t *testing.T) {
 		t.Fatalf("duplicate approval = package %s approved_at %s, want package %s approved_at %s",
 			duplicateApproval.PackageID, duplicateApproval.ApprovedAt, firstApproval.PackageID, firstApproval.ApprovedAt)
 	}
-	if _, err := store.ApproveForMyOrg(ctx, def, "pkg2", "org-0"); err == nil || !strings.Contains(err.Error(), "already has sequence=1") {
-		t.Fatalf("expected conflicting approval sequence error, got %v", err)
+	if _, err := store.ApproveForMyOrg(ctx, def, "pkg2", "org-0"); err != nil {
+		t.Fatalf("updating a local package binding failed: %v", err)
 	}
 
 	seq2 := ChaincodeDefinition{
@@ -47,7 +47,7 @@ func TestApproveForMyOrgRequiresIncreasingSequence(t *testing.T) {
 	if _, err := store.ApproveForMyOrg(ctx, seq2, "pkg2", "org-0"); err != nil {
 		t.Fatalf("ApproveForMyOrg sequence 2 failed: %v", err)
 	}
-	approval, ok, err := store.GetApproval(ctx, def.Name, def.Version, "org-0")
+	approval, ok, err := store.GetApproval(ctx, seq2, "org-0")
 	if err != nil {
 		t.Fatalf("GetApproval failed: %v", err)
 	}
@@ -56,6 +56,88 @@ func TestApproveForMyOrgRequiresIncreasingSequence(t *testing.T) {
 	}
 	if approval.Definition.Sequence != 2 || approval.PackageID != "pkg2" {
 		t.Fatalf("approval = sequence %d package %s, want sequence 2 package pkg2", approval.Definition.Sequence, approval.PackageID)
+	}
+}
+
+func TestUpgradeReplacesActiveVersionAndPreservesPendingPackageBinding(t *testing.T) {
+	ctx := t.Context()
+	store := newTestStore(t)
+	installTestPackage(t, ctx, store, "pkg1", "127.0.0.1:9999")
+	installTestPackage(t, ctx, store, "pkg2", "127.0.0.1:10000")
+	def := testDefinition()
+	if _, err := store.ApproveForMyOrg(ctx, def, "pkg1", "org-0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitDefinition(ctx, def, "org-0"); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := def
+	upgraded.Version = "2.0"
+	// Changing a version must never create another sequence-1 chaincode.
+	if _, err := store.ApproveForMyOrg(ctx, upgraded, "pkg2", "org-0"); err == nil {
+		t.Fatal("version change reset sequence")
+	}
+	upgraded.Sequence = 2
+	if _, err := store.ApproveForMyOrg(ctx, upgraded, "pkg2", "org-0"); err != nil {
+		t.Fatal(err)
+	}
+	active, pkg, ok, err := store.ResolveCommittedPackage(ctx, def.Name, "org-0")
+	if err != nil || !ok || active.Definition != def || pkg.PackageID != "pkg1" {
+		t.Fatalf("pending approval changed active package: %+v %+v %v", active, pkg, err)
+	}
+	wrongVersion := upgraded
+	wrongVersion.Version = "2.1"
+	if approved, err := store.HasMatchingApproval(ctx, wrongVersion, "org-0"); err != nil || approved {
+		t.Fatalf("version properties were not compared: %v", err)
+	}
+	if _, err := store.CommitDefinition(ctx, upgraded, "org-0"); err != nil {
+		t.Fatal(err)
+	}
+	active, pkg, ok, err = store.ResolveCommittedPackage(ctx, def.Name, "org-0")
+	if err != nil || !ok || active.Definition != upgraded || pkg.PackageID != "pkg2" {
+		t.Fatalf("upgrade did not activate new binding: %+v %+v %v", active, pkg, err)
+	}
+	definitions, err := store.ListCommitted(ctx, def.Name, "")
+	if err != nil || len(definitions) != 1 {
+		t.Fatalf("multiple active versions: %+v %v", definitions, err)
+	}
+	if _, err := store.ApproveForMyOrg(ctx, def, "pkg1", "org-0"); err == nil {
+		t.Fatal("superseded sequence accepted")
+	}
+	upgraded.Sequence = 4
+	if _, err := store.ApproveForMyOrg(ctx, upgraded, "pkg2", "org-0"); err == nil {
+		t.Fatal("skipped sequence accepted")
+	}
+	upgraded.Sequence = 3
+	// A definition-only revision may retain its descriptive version.
+	if _, err := store.ApproveForMyOrg(ctx, upgraded, "pkg2", "org-0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitDefinition(ctx, upgraded, "org-0"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLedgerHydrationCannotRevertActiveRevision(t *testing.T) {
+	store := newTestStore(t)
+	def := testDefinition()
+	def.Version, def.Sequence, def.InitRequired = "2.0", 2, true
+	if _, err := store.UpsertCommittedFromLedger(t.Context(), def, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertCommittedFromLedger(t.Context(), testDefinition(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertCommittedFromLedger(t.Context(), def, false); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := store.GetCommitted(t.Context(), def.Name)
+	if got.Definition != def || !got.Initialized {
+		t.Fatalf("stale hydration reverted active definition: %+v", got)
+	}
+	def.Version = "conflicting"
+	if _, err := store.UpsertCommittedFromLedger(t.Context(), def, true); err == nil {
+		t.Fatal("same-sequence definition conflict accepted")
 	}
 }
 
@@ -74,7 +156,7 @@ func TestCommitDefinitionResolvesLocalPackage(t *testing.T) {
 		t.Fatalf("expected duplicate commit sequence error, got %v", err)
 	}
 
-	committed, pkg, ok, err := store.ResolveCommittedPackage(ctx, "", "", "org-0")
+	committed, pkg, ok, err := store.ResolveCommittedPackage(ctx, "", "org-0")
 	if err != nil {
 		t.Fatalf("ResolveCommittedPackage failed: %v", err)
 	}
@@ -185,7 +267,7 @@ func TestResolvedConnectionCache(t *testing.T) {
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := NewMemoryStore()
+	store, err := NewMemoryStore("channelqc4")
 	if err != nil {
 		t.Fatalf("NewMemoryStore failed: %v", err)
 	}

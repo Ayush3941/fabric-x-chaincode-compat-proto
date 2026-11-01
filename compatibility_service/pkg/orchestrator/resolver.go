@@ -28,6 +28,7 @@ type ChaincodeResolverConfig struct {
 }
 
 type StaticChaincodeConnectionConfig struct {
+	ChannelID string           `mapstructure:"channel-id"`
 	MSPID     string           `mapstructure:"msp-id"`
 	Name      string           `mapstructure:"name"`
 	Version   string           `mapstructure:"version"`
@@ -45,6 +46,7 @@ type DynamicChaincodeResolverConfig struct {
 }
 
 type chaincodeResolverRequest struct {
+	ChannelID  string
 	MSPID      string
 	Definition lifecycle.ChaincodeDefinition
 }
@@ -133,6 +135,9 @@ func newStaticChaincodeResolver(entries []StaticChaincodeConnectionConfig, logge
 func (r *staticChaincodeResolver) Resolve(_ context.Context, req chaincodeResolverRequest) (lifecycle.ResolvedChaincodeConnection, bool, error) {
 	def := req.Definition
 	for _, entry := range r.entries {
+		if entry.ChannelID != "" && entry.ChannelID != req.ChannelID {
+			continue
+		}
 		if entry.MSPID != "" && entry.MSPID != req.MSPID {
 			continue
 		}
@@ -217,6 +222,7 @@ func (r *grpcChaincodeResolver) Resolve(ctx context.Context, req chaincodeResolv
 	defer cancel()
 	out, err := r.client.Resolve(resolveCtx, &ccresolver.ResolveRequest{
 		Operation: ccresolver.OperationChaincodeResolution,
+		ChannelID: req.ChannelID,
 		MSPID:     req.MSPID,
 		Name:      def.Name,
 		Version:   def.Version,

@@ -67,19 +67,27 @@ type ResolvedChaincodeConnection struct {
 	CachedAt  string `json:"cached_at"`
 }
 
-// Store keeps lifecycle state for one running orchestrator process.
+// Store keeps lifecycle state for one running Orchestrator's configured channel.
+// Installation is org-local; definitions are identified by name within that channel.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	channelID string
 }
 
-// NewMemoryStore creates a volatile SQLite lifecycle database. Installed
-// package records disappear when the orchestrator process exits.
-func NewMemoryStore() (*Store, error) {
+// ChannelID is the lifecycle scope of this process-local store.
+func (s *Store) ChannelID() string { return s.channelID }
+
+// NewMemoryStore creates a volatile SQLite lifecycle database scoped to one
+// channel. Installed package records disappear when the process exits.
+func NewMemoryStore(channelID string) (*Store, error) {
+	if channelID == "" {
+		return nil, fmt.Errorf("channel ID is required")
+	}
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:compat_lifecycle_%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	if err != nil {
 		return nil, err
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, channelID: channelID}
 	if err := store.init(context.Background()); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -105,7 +113,6 @@ CREATE TABLE IF NOT EXISTS installed_packages (
 	}
 	_, err = s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS approved_definitions (
-	ccid TEXT NOT NULL,
 	name TEXT NOT NULL,
 	version TEXT NOT NULL,
 	sequence INTEGER NOT NULL,
@@ -113,15 +120,14 @@ CREATE TABLE IF NOT EXISTS approved_definitions (
 	init_required INTEGER NOT NULL,
 	approving_msp TEXT NOT NULL,
 	approved_at TEXT NOT NULL,
-	PRIMARY KEY(ccid, approving_msp)
+	PRIMARY KEY(name, sequence, approving_msp)
 )`)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS committed_definitions (
-	ccid TEXT PRIMARY KEY,
-	name TEXT NOT NULL,
+	name TEXT PRIMARY KEY,
 	version TEXT NOT NULL,
 	sequence INTEGER NOT NULL,
 	init_required INTEGER NOT NULL,
@@ -134,7 +140,6 @@ CREATE TABLE IF NOT EXISTS committed_definitions (
 	_, err = s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS resolved_connections (
 	msp_id TEXT NOT NULL,
-	ccid TEXT NOT NULL,
 	name TEXT NOT NULL,
 	version TEXT NOT NULL,
 	sequence INTEGER NOT NULL,
@@ -142,7 +147,7 @@ CREATE TABLE IF NOT EXISTS resolved_connections (
 	tls_mode TEXT NOT NULL,
 	package_id TEXT NOT NULL,
 	cached_at TEXT NOT NULL,
-	PRIMARY KEY(msp_id, ccid, sequence)
+	PRIMARY KEY(msp_id, name, sequence)
 )`)
 	return err
 }
@@ -225,15 +230,12 @@ ORDER BY label, package_id`)
 	return packages, nil
 }
 
-// ApproveForMyOrg records a local organization's current approval for a ccid.
-// Re-approving the exact same definition is idempotent. New approvals must use
-// a greater sequence and match the next lifecycle sequence for the committed
-// definition.
+// ApproveForMyOrg records an organization's package binding for a definition
+// sequence. Pending approvals do not replace the active sequence's binding.
 func (s *Store) ApproveForMyOrg(ctx context.Context, def ChaincodeDefinition, packageID, approvingMSP string) (ApprovedDefinition, error) {
 	if err := validateDefinition(def); err != nil {
 		return ApprovedDefinition{}, err
 	}
-	ccid := definitionCCID(def)
 	if packageID == "" {
 		return ApprovedDefinition{}, fmt.Errorf("package id is required")
 	}
@@ -248,76 +250,62 @@ func (s *Store) ApproveForMyOrg(ctx context.Context, def ChaincodeDefinition, pa
 		return ApprovedDefinition{}, fmt.Errorf("package %s is not installed", packageID)
 	}
 
-	existing, ok, err := s.GetApproval(ctx, def.Name, def.Version, approvingMSP)
+	current, active, err := s.GetCommitted(ctx, def.Name)
 	if err != nil {
 		return ApprovedDefinition{}, err
 	}
-	if ok {
-		if approvalMatches(existing, def, packageID) {
-			return existing, nil
+	if active && current.Definition.Sequence == def.Sequence {
+		if !definitionMatches(current.Definition, def) {
+			return ApprovedDefinition{}, fmt.Errorf("approval does not match committed definition name=%s sequence=%d", def.Name, def.Sequence)
 		}
-		if existing.Definition.Sequence >= def.Sequence {
-			return ApprovedDefinition{}, fmt.Errorf("approval for ccid=%s msp=%s already has sequence=%d; requested sequence=%d must be greater",
-				ccid, approvingMSP, existing.Definition.Sequence, def.Sequence)
-		}
-	}
-	if err := s.validateNextSequence(ctx, def); err != nil {
+	} else if err := s.validateNextSequence(ctx, def); err != nil {
 		return ApprovedDefinition{}, err
 	}
-
+	existing, ok, err := s.GetApproval(ctx, def, approvingMSP)
+	if err != nil {
+		return ApprovedDefinition{}, err
+	}
+	if ok && approvalMatches(existing, def, packageID) {
+		return existing, nil
+	}
 	approval := ApprovedDefinition{
-		Definition:     def,
-		PackageID:      packageID,
-		ApprovingMSP:   approvingMSP,
-		ApprovedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		PackageAddress: pkg.Address,
+		Definition: def, PackageID: packageID, ApprovingMSP: approvingMSP,
+		ApprovedAt: time.Now().UTC().Format(time.RFC3339Nano), PackageAddress: pkg.Address,
 	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO approved_definitions (
-	ccid, name, version, sequence, package_id, init_required, approving_msp, approved_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(ccid, approving_msp) DO UPDATE SET
-	name = excluded.name,
+	name, version, sequence, package_id, init_required, approving_msp, approved_at
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(name, sequence, approving_msp) DO UPDATE SET
 	version = excluded.version,
-	sequence = excluded.sequence,
 	package_id = excluded.package_id,
 	init_required = excluded.init_required,
 	approved_at = excluded.approved_at`,
-		ccid,
-		def.Name,
-		def.Version,
-		def.Sequence,
-		packageID,
-		boolInt(def.InitRequired),
-		approvingMSP,
-		approval.ApprovedAt,
-	)
+		def.Name, def.Version, def.Sequence, packageID, boolInt(def.InitRequired), approvingMSP, approval.ApprovedAt)
 	if err != nil {
 		return ApprovedDefinition{}, err
 	}
-	return approval, nil
+	// A changed org-local package binding must not keep an earlier endpoint cached.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM resolved_connections WHERE msp_id = ? AND name = ? AND sequence = ?`, approvingMSP, def.Name, def.Sequence)
+	return approval, err
 }
 
-// GetApproval returns one local approval for a chaincode ID and MSP.
-func (s *Store) GetApproval(ctx context.Context, name, version, approvingMSP string) (ApprovedDefinition, bool, error) {
-	ccid, err := ccidFromNameVersion(name, version)
-	if err != nil {
+// GetApproval returns the local approval at the requested name and sequence.
+// Callers compare the definition properties (including version) for readiness.
+func (s *Store) GetApproval(ctx context.Context, def ChaincodeDefinition, approvingMSP string) (ApprovedDefinition, bool, error) {
+	if err := validateDefinition(def); err != nil {
 		return ApprovedDefinition{}, false, err
 	}
 	row := s.db.QueryRowContext(ctx, `
 SELECT a.name, a.version, a.sequence, a.package_id, a.init_required, a.approving_msp, a.approved_at, p.address
 FROM approved_definitions a
 JOIN installed_packages p ON p.package_id = a.package_id
-WHERE a.ccid = ? AND a.approving_msp = ?`,
-		ccid, approvingMSP)
+WHERE a.name = ? AND a.sequence = ? AND a.approving_msp = ?`, def.Name, def.Sequence, approvingMSP)
 	approval, err := scanApproval(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ApprovedDefinition{}, false, nil
-		}
-		return ApprovedDefinition{}, false, err
+	if errors.Is(err, sql.ErrNoRows) {
+		return ApprovedDefinition{}, false, nil
 	}
-	return approval, true, nil
+	return approval, err == nil, err
 }
 
 // HasMatchingApproval returns true when this MSP has approved the exact shared
@@ -326,7 +314,7 @@ func (s *Store) HasMatchingApproval(ctx context.Context, def ChaincodeDefinition
 	if err := validateDefinition(def); err != nil {
 		return false, err
 	}
-	approval, ok, err := s.GetApproval(ctx, def.Name, def.Version, approvingMSP)
+	approval, ok, err := s.GetApproval(ctx, def, approvingMSP)
 	if err != nil || !ok {
 		return false, err
 	}
@@ -368,7 +356,7 @@ func (s *Store) UpsertCommittedFromLedger(ctx context.Context, def ChaincodeDefi
 	if err := validateDefinition(def); err != nil {
 		return CommittedDefinition{}, err
 	}
-	existing, ok, err := s.GetCommitted(ctx, def.Name, def.Version)
+	existing, ok, err := s.GetCommitted(ctx, def.Name)
 	if err != nil {
 		return CommittedDefinition{}, err
 	}
@@ -376,10 +364,13 @@ func (s *Store) UpsertCommittedFromLedger(ctx context.Context, def ChaincodeDefi
 		if existing.Definition.Sequence > def.Sequence {
 			return existing, nil
 		}
-		if existing.Definition.Sequence == def.Sequence &&
-			existing.Definition.InitRequired == def.InitRequired &&
-			existing.Initialized == initialized {
-			return existing, nil
+		if existing.Definition.Sequence == def.Sequence {
+			if !definitionMatches(existing.Definition, def) {
+				return CommittedDefinition{}, fmt.Errorf("conflicting ledger definition name=%s sequence=%d", def.Name, def.Sequence)
+			}
+			if existing.Initialized || existing.Initialized == initialized {
+				return existing, nil
+			}
 		}
 	}
 	return s.upsertCommitted(ctx, CommittedDefinition{
@@ -399,16 +390,21 @@ func (s *Store) upsertCommitted(ctx context.Context, committed CommittedDefiniti
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO committed_definitions (
-	ccid, name, version, sequence, init_required, initialized, committed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(ccid) DO UPDATE SET
+	name, version, sequence, init_required, initialized, committed_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(name) DO UPDATE SET
 	name = excluded.name,
 	version = excluded.version,
 	sequence = excluded.sequence,
 	init_required = excluded.init_required,
-	initialized = excluded.initialized,
-	committed_at = excluded.committed_at`,
-		definitionCCID(def),
+	initialized = CASE WHEN committed_definitions.sequence = excluded.sequence
+		THEN MAX(committed_definitions.initialized, excluded.initialized)
+		ELSE excluded.initialized END,
+	committed_at = excluded.committed_at
+WHERE excluded.sequence > committed_definitions.sequence OR
+	(excluded.sequence = committed_definitions.sequence AND
+	 excluded.version = committed_definitions.version AND
+	 excluded.init_required = committed_definitions.init_required)`,
 		def.Name,
 		def.Version,
 		def.Sequence,
@@ -419,7 +415,11 @@ ON CONFLICT(ccid) DO UPDATE SET
 	if err != nil {
 		return CommittedDefinition{}, err
 	}
-	return committed, nil
+	active, _, err := s.GetCommitted(ctx, def.Name)
+	if err == nil && active.Definition.Sequence == def.Sequence && !definitionMatches(active.Definition, def) {
+		err = fmt.Errorf("conflicting ledger definition name=%s sequence=%d", def.Name, def.Sequence)
+	}
+	return active, err
 }
 
 // MarkInitialized records that the committed definition's required init
@@ -430,7 +430,7 @@ func (s *Store) MarkInitialized(ctx context.Context, def ChaincodeDefinition, lo
 	}
 	_ = localMSP
 
-	committed, ok, err := s.GetCommitted(ctx, def.Name, def.Version)
+	committed, ok, err := s.GetCommitted(ctx, def.Name)
 	if err != nil {
 		return CommittedDefinition{}, err
 	}
@@ -453,9 +453,11 @@ func (s *Store) MarkInitialized(ctx context.Context, def ChaincodeDefinition, lo
 	_, err = s.db.ExecContext(ctx, `
 UPDATE committed_definitions
 SET initialized = 1, committed_at = ?
-WHERE ccid = ?`,
+WHERE name = ? AND sequence = ? AND version = ? AND init_required = 1`,
 		committed.CommittedAt,
-		definitionCCID(def),
+		def.Name,
+		def.Sequence,
+		def.Version,
 	)
 	if err != nil {
 		return CommittedDefinition{}, err
@@ -463,28 +465,25 @@ WHERE ccid = ?`,
 	return committed, nil
 }
 
-// GetCommitted returns the active definition for a chaincode name and version.
-func (s *Store) GetCommitted(ctx context.Context, name, version string) (CommittedDefinition, bool, error) {
-	ccid, err := ccidFromNameVersion(name, version)
-	if err != nil {
-		return CommittedDefinition{}, false, err
+// GetCommitted returns the one active definition for a chaincode name on this
+// store's channel. Version is a definition property, never a lookup key.
+func (s *Store) GetCommitted(ctx context.Context, name string) (CommittedDefinition, bool, error) {
+	if name == "" {
+		return CommittedDefinition{}, false, fmt.Errorf("chaincode name is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
 SELECT name, version, sequence, init_required, initialized, committed_at
 FROM committed_definitions
-WHERE ccid = ?`, ccid)
+WHERE name = ?`, name)
 	committed, err := scanCommitted(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return CommittedDefinition{}, false, nil
-		}
-		return CommittedDefinition{}, false, err
+	if errors.Is(err, sql.ErrNoRows) {
+		return CommittedDefinition{}, false, nil
 	}
-	return committed, true, nil
+	return committed, err == nil, err
 }
 
-// ListCommitted returns committed definitions. If name and version are set, it
-// returns at most one definition.
+// ListCommitted lists active definitions. Version is an optional result filter;
+// old versions are not independently active.
 func (s *Store) ListCommitted(ctx context.Context, name, version string) ([]CommittedDefinition, error) {
 	query := `
 SELECT name, version, sequence, init_required, initialized, committed_at
@@ -525,22 +524,22 @@ FROM committed_definitions`
 }
 
 // ResolveCommittedPackage resolves the active definition to the local installed
-// CCAAS package for this MSP. If name/version are empty, exactly one committed
+// CCAAS package for this MSP. If name is empty, exactly one committed
 // definition must exist.
-func (s *Store) ResolveCommittedPackage(ctx context.Context, name, version, localMSP string) (CommittedDefinition, InstalledPackage, bool, error) {
-	definitions, err := s.ListCommitted(ctx, name, version)
+func (s *Store) ResolveCommittedPackage(ctx context.Context, name, localMSP string) (CommittedDefinition, InstalledPackage, bool, error) {
+	definitions, err := s.ListCommitted(ctx, name, "")
 	if err != nil {
 		return CommittedDefinition{}, InstalledPackage{}, false, err
 	}
 	if len(definitions) == 0 {
 		return CommittedDefinition{}, InstalledPackage{}, false, nil
 	}
-	if (name == "" || version == "") && len(definitions) > 1 {
-		return CommittedDefinition{}, InstalledPackage{}, false, fmt.Errorf("%d committed definitions are active; chaincode name and version are required",
+	if name == "" && len(definitions) > 1 {
+		return CommittedDefinition{}, InstalledPackage{}, false, fmt.Errorf("%d committed definitions are active; chaincode name is required",
 			len(definitions))
 	}
 	committed := definitions[0]
-	approval, ok, err := s.GetApproval(ctx, committed.Definition.Name, committed.Definition.Version, localMSP)
+	approval, ok, err := s.GetApproval(ctx, committed.Definition, localMSP)
 	if err != nil {
 		return CommittedDefinition{}, InstalledPackage{}, false, err
 	}
@@ -564,21 +563,23 @@ func (s *Store) GetResolvedConnection(ctx context.Context, mspID string, def Cha
 	if mspID == "" {
 		return ResolvedChaincodeConnection{}, false, fmt.Errorf("MSP ID is required")
 	}
-	ccid, err := ccidFromNameVersion(def.Name, def.Version)
-	if err != nil {
+	if err := validateDefinition(def); err != nil {
 		return ResolvedChaincodeConnection{}, false, err
 	}
 	row := s.db.QueryRowContext(ctx, `
 SELECT msp_id, name, version, sequence, address, tls_mode, package_id, cached_at
 FROM resolved_connections
-WHERE msp_id = ? AND ccid = ? AND sequence = ?`,
-		mspID, ccid, def.Sequence)
+WHERE msp_id = ? AND name = ? AND sequence = ?`,
+		mspID, def.Name, def.Sequence)
 	conn, err := scanResolvedConnection(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ResolvedChaincodeConnection{}, false, nil
 		}
 		return ResolvedChaincodeConnection{}, false, err
+	}
+	if conn.Version != def.Version {
+		return ResolvedChaincodeConnection{}, false, nil
 	}
 	return conn, true, nil
 }
@@ -601,18 +602,17 @@ func (s *Store) PutResolvedConnection(ctx context.Context, conn ResolvedChaincod
 	if conn.CachedAt == "" {
 		conn.CachedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	ccid := definitionCCID(def)
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO resolved_connections (
-	msp_id, ccid, name, version, sequence, address, tls_mode, package_id, cached_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(msp_id, ccid, sequence) DO UPDATE SET
+	msp_id, name, version, sequence, address, tls_mode, package_id, cached_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(msp_id, name, sequence) DO UPDATE SET
+	version = excluded.version,
 	address = excluded.address,
 	tls_mode = excluded.tls_mode,
 	package_id = excluded.package_id,
 	cached_at = excluded.cached_at`,
 		conn.MSPID,
-		ccid,
 		conn.Name,
 		conn.Version,
 		conn.Sequence,
@@ -729,37 +729,36 @@ func definitionMatches(left, right ChaincodeDefinition) bool {
 }
 
 func (s *Store) validateNextSequence(ctx context.Context, def ChaincodeDefinition) error {
-	existing, ok, err := s.GetCommitted(ctx, def.Name, def.Version)
+	existing, ok, err := s.GetCommitted(ctx, def.Name)
 	if err != nil {
 		return err
 	}
-	ccid := definitionCCID(def)
 	if !ok {
-		if def.Sequence != 1 {
-			return fmt.Errorf("initial sequence for ccid=%s must be 1; requested sequence=%d", ccid, def.Sequence)
+		return ValidateNextSequence(nil, def)
+	}
+	return ValidateNextSequence(&existing.Definition, def)
+}
+
+// ValidateNextSequence applies the same revision rule to local approval checks
+// and ledger-backed commitment, including updates that change version labels.
+func ValidateNextSequence(current *ChaincodeDefinition, next ChaincodeDefinition) error {
+	if err := validateDefinition(next); err != nil {
+		return err
+	}
+	if current == nil {
+		if next.Sequence != 1 {
+			return fmt.Errorf("initial sequence for chaincode=%s must be 1; requested sequence=%d", next.Name, next.Sequence)
 		}
 		return nil
 	}
-	expected := existing.Definition.Sequence + 1
-	if def.Sequence != expected {
-		return fmt.Errorf("next sequence for ccid=%s must be %d; active sequence=%d requested sequence=%d",
-			ccid, expected, existing.Definition.Sequence, def.Sequence)
+	if current.Name != next.Name {
+		return fmt.Errorf("chaincode name cannot change within a definition revision")
+	}
+	expected := current.Sequence + 1
+	if next.Sequence != expected {
+		return fmt.Errorf("next sequence for chaincode=%s must be %d; active sequence=%d requested sequence=%d", next.Name, expected, current.Sequence, next.Sequence)
 	}
 	return nil
-}
-
-func definitionCCID(def ChaincodeDefinition) string {
-	return DefinitionCCID(def)
-}
-
-func ccidFromNameVersion(name, version string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("chaincode name is required")
-	}
-	if version == "" {
-		return "", fmt.Errorf("version is required")
-	}
-	return fmt.Sprintf("%s:%s", name, version), nil
 }
 
 func boolInt(value bool) int {

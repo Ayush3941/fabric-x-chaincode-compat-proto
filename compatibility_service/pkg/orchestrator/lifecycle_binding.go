@@ -28,7 +28,7 @@ type LifecycleExecutionBinding struct {
 }
 
 func (s *Service) lifecycleExecutionBinding(ctx context.Context, req InvocationRequest, namespace string) *LifecycleExecutionBinding {
-	if s == nil || s.lifecycle == nil || req.ChaincodeName == "" || req.ChaincodeVersion == "" {
+	if s == nil || s.lifecycle == nil || req.ChaincodeName == "" {
 		return nil
 	}
 	localMSP := ""
@@ -39,7 +39,10 @@ func (s *Service) lifecycleExecutionBinding(ctx context.Context, req InvocationR
 		return nil
 	}
 
-	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName, req.ChaincodeVersion)
+	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName)
+	if req.definition != nil {
+		committed, ok, err = *req.definition, true, nil
+	}
 	if err != nil {
 		s.logger.Warnf("lifecycle binding lookup failed name=%s version=%s: %s", req.ChaincodeName, req.ChaincodeVersion, err)
 		return nil
@@ -57,7 +60,7 @@ func (s *Service) lifecycleExecutionBinding(ctx context.Context, req InvocationR
 		Sequence:         def.Sequence,
 	}
 
-	approval, ok, err := s.lifecycle.GetApproval(ctx, def.Name, def.Version, localMSP)
+	approval, ok, err := s.lifecycle.GetApproval(ctx, def, localMSP)
 	if err != nil {
 		s.logger.Debugf("lifecycle binding approval lookup skipped msp=%s name=%s version=%s: %s",
 			localMSP, def.Name, def.Version, err)
@@ -75,6 +78,7 @@ func (s *Service) lifecycleExecutionBinding(ctx context.Context, req InvocationR
 
 	if (binding.PackageID == "" || binding.PackageAddress == "") && s.resolver != nil {
 		resolved, ok, err := s.resolver.Resolve(ctx, chaincodeResolverRequest{
+			ChannelID:  s.cfg.ChannelID,
 			MSPID:      localMSP,
 			Definition: def,
 		})

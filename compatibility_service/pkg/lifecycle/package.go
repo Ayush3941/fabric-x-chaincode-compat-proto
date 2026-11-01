@@ -23,17 +23,8 @@ const externalChaincodeType = "external"
 
 // PackageOptions controls external chaincode package creation.
 type PackageOptions struct {
-	SourceDir  string
-	OutputPath string
-	Label      string
-}
-
-// PackageInfo describes the generated lifecycle package.
-type PackageInfo struct {
+	SourceDir string
 	Label     string
-	Type      string
-	Output    string
-	PackageID string
 }
 
 // PackageDescriptor is the normalized content of a lifecycle package.
@@ -47,63 +38,44 @@ type PackageDescriptor struct {
 	PackageTGZ     []byte
 }
 
-// PackageExternalChaincode creates a Fabric lifecycle package for CCAAS-style
-// external chaincode. The source directory contains connection.json and
-// metadata.json. The output package contains metadata.json and code.tar.gz.
-func PackageExternalChaincode(opts PackageOptions) (PackageInfo, error) {
+// BuildExternalChaincodePackage builds and validates a CCAAS lifecycle package
+// in memory for installation. It does not modify the source directory or write
+// an archive to disk.
+func BuildExternalChaincodePackage(opts PackageOptions) (PackageDescriptor, error) {
 	sourceDir, err := cleanDir(opts.SourceDir)
 	if err != nil {
-		return PackageInfo{}, err
-	}
-	outputPath, err := cleanOutput(opts.OutputPath)
-	if err != nil {
-		return PackageInfo{}, err
+		return PackageDescriptor{}, err
 	}
 
 	connPath := filepath.Join(sourceDir, "connection.json")
 	if err := requireRegularFile(connPath); err != nil {
-		return PackageInfo{}, err
+		return PackageDescriptor{}, err
 	}
 
 	metadata, err := readAndNormalizeMetadata(sourceDir, opts.Label)
 	if err != nil {
-		return PackageInfo{}, err
+		return PackageDescriptor{}, err
 	}
 	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return PackageInfo{}, fmt.Errorf("marshal metadata: %w", err)
+		return PackageDescriptor{}, fmt.Errorf("marshal metadata: %w", err)
 	}
 	metadataBytes = append(metadataBytes, '\n')
-	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), metadataBytes, 0o644); err != nil {
-		return PackageInfo{}, fmt.Errorf("write metadata.json: %w", err)
-	}
 
 	codePackage, err := buildCodePackage(sourceDir)
 	if err != nil {
-		return PackageInfo{}, err
-	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return PackageInfo{}, fmt.Errorf("create output directory: %w", err)
-	}
-	if err := writeOuterPackage(outputPath, metadataBytes, codePackage); err != nil {
-		return PackageInfo{}, err
+		return PackageDescriptor{}, err
 	}
 
-	packageBytes, err := os.ReadFile(outputPath)
+	packageBytes, err := buildOuterPackage(metadataBytes, codePackage)
 	if err != nil {
-		return PackageInfo{}, fmt.Errorf("read generated package: %w", err)
+		return PackageDescriptor{}, err
 	}
 	desc, err := InspectPackageBytes(packageBytes)
 	if err != nil {
-		return PackageInfo{}, fmt.Errorf("inspect generated package: %w", err)
+		return PackageDescriptor{}, fmt.Errorf("inspect generated package: %w", err)
 	}
-	label := metadataString(metadata, "label")
-	return PackageInfo{
-		Label:     label,
-		Type:      externalChaincodeType,
-		Output:    outputPath,
-		PackageID: desc.PackageID,
-	}, nil
+	return desc, nil
 }
 
 // InspectPackageBytes validates a lifecycle package and extracts the metadata
@@ -227,13 +199,6 @@ func cleanDir(path string) (string, error) {
 	return clean, nil
 }
 
-func cleanOutput(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("output is required")
-	}
-	return filepath.Clean(path), nil
-}
-
 func requireRegularFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -256,6 +221,9 @@ func readAndNormalizeMetadata(sourceDir, labelOverride string) (map[string]any, 
 	} else if len(bytes.TrimSpace(data)) > 0 {
 		if err := json.Unmarshal(data, &metadata); err != nil {
 			return nil, fmt.Errorf("decode metadata.json: %w", err)
+		}
+		if metadata == nil {
+			return nil, errors.New("metadata.json must contain an object")
 		}
 	}
 
@@ -334,28 +302,23 @@ func addTree(tw *tar.Writer, root, dir string) error {
 	})
 }
 
-func writeOuterPackage(outputPath string, metadataBytes, codePackage []byte) error {
-	file, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("create package: %w", err)
-	}
-	defer file.Close() //nolint:errcheck
-
-	gz := gzip.NewWriter(file)
+func buildOuterPackage(metadataBytes, codePackage []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	if err := writeBytes(tw, "metadata.json", metadataBytes, 0o644); err != nil {
-		return err
+		return nil, err
 	}
 	if err := writeBytes(tw, "code.tar.gz", codePackage, 0o644); err != nil {
-		return err
+		return nil, err
 	}
 	if err := tw.Close(); err != nil {
-		return fmt.Errorf("close package tar: %w", err)
+		return nil, fmt.Errorf("close package tar: %w", err)
 	}
 	if err := gz.Close(); err != nil {
-		return fmt.Errorf("close package gzip: %w", err)
+		return nil, fmt.Errorf("close package gzip: %w", err)
 	}
-	return nil
+	return buf.Bytes(), nil
 }
 
 func addDir(tw *tar.Writer, path, name string) error {

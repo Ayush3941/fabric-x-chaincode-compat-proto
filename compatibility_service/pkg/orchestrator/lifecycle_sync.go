@@ -14,7 +14,7 @@ func (s *Service) syncLifecycleFromLedger(ctx context.Context) error {
 		return nil
 	}
 	namespace := s.cfg.lifecycleNamespace()
-	value, _, ok, err := s.lifecycleRow(ctx, namespace, lifecycle.LifecycleHighWatermarkKey)
+	value, _, ok, err := s.lifecycleRow(ctx, namespace, lifecycle.LifecycleHighWatermarkKey(s.cfg.ChannelID))
 	if err != nil {
 		return err
 	}
@@ -29,7 +29,7 @@ func (s *Service) syncLifecycleFromLedger(ctx context.Context) error {
 
 	hydrated := 0
 	for i := uint64(1); i <= highWatermark; i++ {
-		entryKey := lifecycle.LifecycleIndexEntryKey(i)
+		entryKey := lifecycle.LifecycleIndexEntryKey(s.cfg.ChannelID, i)
 		entryValue, _, ok, err := s.lifecycleRow(ctx, namespace, entryKey)
 		if err != nil {
 			return fmt.Errorf("read lifecycle index entry %s: %w", entryKey, err)
@@ -40,6 +40,9 @@ func (s *Service) syncLifecycleFromLedger(ctx context.Context) error {
 		entry, err := lifecycle.UnmarshalLifecycleIndexEntry(entryValue)
 		if err != nil {
 			return fmt.Errorf("decode lifecycle index entry %s: %w", entryKey, err)
+		}
+		if entry.ChannelID != s.cfg.ChannelID || entry.Number != i {
+			return fmt.Errorf("lifecycle index identity mismatch at %s", entryKey)
 		}
 		defKey := entry.DefinitionKey
 		if defKey == "" {
@@ -55,6 +58,9 @@ func (s *Service) syncLifecycleFromLedger(ctx context.Context) error {
 		ledgerDef, err := lifecycle.UnmarshalLedgerDefinition(defValue)
 		if err != nil {
 			return fmt.Errorf("decode lifecycle definition %s: %w", defKey, err)
+		}
+		if ledgerDef.ChannelID != s.cfg.ChannelID || ledgerDef.Name != entry.Name {
+			return fmt.Errorf("lifecycle definition identity mismatch at %s", defKey)
 		}
 		def := lifecycle.ChaincodeDefinitionFromLedger(ledgerDef)
 		if _, err := s.lifecycle.UpsertCommittedFromLedger(ctx, def, ledgerDef.Initialized); err != nil {

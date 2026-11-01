@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"compatibility_service/pkg/lifecycle"
 	"compatibility_service/pkg/orchestrator"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
@@ -173,7 +174,7 @@ func TestTimeoutPreventsSubmit(t *testing.T) {
 	assertHeightUnchanged(t, h, before)
 }
 
-func TestRetryAfterCompletedResultDoesNotSubmitAgain(t *testing.T) {
+func TestCompletedTransactionStatusDoesNotSubmitAgain(t *testing.T) {
 	h := newHarness(t, harnessOptions{
 		name:        "completed-retry",
 		requestWait: "45s",
@@ -197,16 +198,16 @@ func TestRetryAfterCompletedResultDoesNotSubmitAgain(t *testing.T) {
 		t.Fatalf("expected first invoke to add one block, before=%d after=%d", before, afterFirst)
 	}
 
-	second, err := h.invokeSigned(ctx, prop)
+	client := h.gatewaySDK(t, 0, 0)
+	commit, err := client.NewCommit(h.gatewayStatusBytes(t, 0, first.TxID))
 	if err != nil {
-		t.Fatalf("retry invoke failed: %v", err)
+		t.Fatal(err)
 	}
-	if !second.IdempotentReplay {
-		t.Fatal("expected completed retry to be served from the stored idempotency result")
+	second, err := commit.StatusWithContext(ctx)
+	if err != nil || !second.Successful || second.TransactionID != first.TxID || second.BlockNumber != first.BlockNum {
+		t.Fatalf("ledger status changed after local completion: %+v %v", second, err)
 	}
-	if second.TxID != first.TxID || second.BlockNum != first.BlockNum {
-		t.Fatalf("retry returned different result: first=(%s,%d) second=(%s,%d)", first.TxID, first.BlockNum, second.TxID, second.BlockNum)
-	}
+
 	afterSecond := h.blockHeight(t)
 	if afterSecond != afterFirst {
 		t.Fatalf("retry should not commit another block, afterFirst=%d afterSecond=%d", afterFirst, afterSecond)
@@ -255,15 +256,17 @@ func TestSameTxIDDifferentRequestConflicts(t *testing.T) {
 }
 
 type harnessOptions struct {
-	name           string
-	disableOrg1    bool
-	org0Sleep      string
-	org1Sleep      string
-	org1Mismatch   string
-	requestWait    string
-	finality       string
-	proposalPolicy string
-	deferFinality  bool
+	name                string
+	sampleChaincode     bool
+	chaincodeDefinition *lifecycle.ChaincodeDefinition
+	disableOrg1         bool
+	org0Sleep           string
+	org1Sleep           string
+	org1Mismatch        string
+	requestWait         string
+	finality            string
+	proposalPolicy      string
+	deferFinality       bool
 }
 
 type testPorts struct {
@@ -275,13 +278,22 @@ type testPorts struct {
 }
 
 type e2eHarness struct {
-	root           string
-	compatDir      string
-	chaincodeDir   string
-	ports          testPorts
-	proposalPolicy string
-	namespace      string
-	finalityProxy  *deferredFinalityService
+	root                string
+	compatDir           string
+	chaincodeDir        string
+	ports               testPorts
+	proposalPolicy      string
+	namespace           string
+	finalityProxy       *deferredFinalityService
+	chaincodeDefinition *lifecycle.ChaincodeDefinition
+	processes           map[string]*e2eProcess
+}
+
+type e2eProcess struct {
+	cmd    *exec.Cmd
+	logDir string
+	env    []string
+	stop   func()
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
@@ -304,11 +316,12 @@ func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
 	ensureNetworkReady(t, root)
 
 	h := &e2eHarness{
-		root:           root,
-		compatDir:      filepath.Join(root, "compatibility_service"),
-		chaincodeDir:   filepath.Join(root, "sample_external_chaincode"),
-		ports:          nextPorts(),
-		proposalPolicy: opts.proposalPolicy,
+		root:                root,
+		compatDir:           filepath.Join(root, "compatibility_service"),
+		chaincodeDir:        filepath.Join(root, "sample_external_chaincode"),
+		ports:               nextPorts(),
+		proposalPolicy:      opts.proposalPolicy,
+		chaincodeDefinition: opts.chaincodeDefinition,
 	}
 
 	logDir := filepath.Join(root, "runtime", "compatibility_service", "e2e")
@@ -323,7 +336,14 @@ func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
 		h.finalityProxy = h.startDeferredFinality(t, org0Cfg)
 	}
 
-	h.startProcess(t, "chaincode-org0", h.chaincodeDir, logDir, []string{envIfSet("E2E_COMPATV2_SLEEP", opts.org0Sleep)}, "./bin/e2e-chaincode", "-ccid", "0:sample", "-address", fmt.Sprintf("127.0.0.1:%d", h.ports.org0CC))
+	chaincodeBinary := "./bin/e2e-chaincode"
+	if opts.sampleChaincode {
+		if err := runBuild(root, h.chaincodeDir, "go", "build", "-o", "bin/sample-chaincode", "./cmd/server"); err != nil {
+			t.Fatal(err)
+		}
+		chaincodeBinary = "./bin/sample-chaincode"
+	}
+	h.startProcess(t, "chaincode-org0", h.chaincodeDir, logDir, []string{envIfSet("E2E_COMPATV2_SLEEP", opts.org0Sleep)}, chaincodeBinary, "-ccid", "sample", "-address", fmt.Sprintf("127.0.0.1:%d", h.ports.org0CC))
 	waitForPort(t, h.ports.org0CC)
 
 	if !opts.disableOrg1 {
@@ -331,7 +351,7 @@ func newHarness(t *testing.T, opts harnessOptions) *e2eHarness {
 			envIfSet("E2E_COMPATV2_SLEEP", opts.org1Sleep),
 			envIfSet("E2E_COMPATV2_MISMATCH", opts.org1Mismatch),
 		}
-		h.startProcess(t, "chaincode-org1", h.chaincodeDir, logDir, env, "./bin/e2e-chaincode", "-ccid", "0:sample", "-address", fmt.Sprintf("127.0.0.1:%d", h.ports.org1CC))
+		h.startProcess(t, "chaincode-org1", h.chaincodeDir, logDir, env, chaincodeBinary, "-ccid", "sample", "-address", fmt.Sprintf("127.0.0.1:%d", h.ports.org1CC))
 		waitForPort(t, h.ports.org1CC)
 	}
 
@@ -356,6 +376,26 @@ func (h *e2eHarness) remoteOrg1Port(opts harnessOptions) int {
 func (h *e2eHarness) writeOrchestratorConfig(t *testing.T, dir string, org, serverPort, ccPort, remoteOrg, remotePort int, requestWait, finality string) string {
 	t.Helper()
 	path := filepath.Join(dir, fmt.Sprintf("orchestrator-org%d.yaml", org))
+	chaincodeConfig := fmt.Sprintf(`chaincode-service:
+  endpoint:
+    host: 127.0.0.1
+    port: %d
+  tls:
+    mode: none
+`, ccPort)
+	if def := h.chaincodeDefinition; def != nil {
+		chaincodeConfig = fmt.Sprintf(`chaincode-resolver:
+  static:
+    - channel-id: %s
+      msp-id: org-%d
+      name: %s
+      version: %q
+      sequence: %d
+      address: 127.0.0.1:%d
+      tls:
+        mode: none
+`, channelID, org, def.Name, def.Version, def.Sequence, ccPort)
+	}
 	data := fmt.Sprintf(`channel-id: %s
 protocol: fabric-x
 wait-after-submit: 0s
@@ -390,12 +430,7 @@ query-service:
       - %s
     server-name: 127.0.0.1
 
-chaincode-service:
-  endpoint:
-    host: 127.0.0.1
-    port: %d
-  tls:
-    mode: none
+%s
 
 orderer:
   endpoint:
@@ -447,7 +482,7 @@ remote-orchestrators:
 		h.orchestratorTLSCert(org),
 		h.orchestratorTLSKey(org),
 		h.peerMSPTLSCA(0),
-		ccPort,
+		chaincodeConfig,
 		h.orchestratorTLSCert(org),
 		h.orchestratorTLSKey(org),
 		h.ordererTLSCA(1),
@@ -501,7 +536,7 @@ lifecycle-auth:
 	return path
 }
 
-func (h *e2eHarness) startProcess(t *testing.T, name, dir, logDir string, env []string, args ...string) {
+func (h *e2eHarness) startProcess(t *testing.T, name, dir, logDir string, env []string, args ...string) *e2eProcess {
 	t.Helper()
 	logPath := filepath.Join(logDir, sanitize(t.Name())+"-"+name+".log")
 	logFile, err := os.Create(logPath)
@@ -520,10 +555,31 @@ func (h *e2eHarness) startProcess(t *testing.T, name, dir, logDir string, env []
 		t.Fatalf("start %s: %v", name, err)
 	}
 	t.Logf("started %s pid=%d log=%s", name, cmd.Process.Pid, logPath)
-	t.Cleanup(func() {
-		terminateProcess(cmd)
-		logFile.Close()
-	})
+	var stopped sync.Once
+	process := &e2eProcess{cmd: cmd, logDir: logDir, env: append([]string(nil), env...)}
+	process.stop = func() { stopped.Do(func() { terminateProcess(cmd); _ = logFile.Close() }) }
+	t.Cleanup(process.stop)
+	if h.processes == nil {
+		h.processes = make(map[string]*e2eProcess)
+	}
+	h.processes[name] = process
+	return process
+}
+
+// Restart an actual managed process with its original arguments and configuration.
+// The idempotent stop function keeps normal test cleanup safe after a restart.
+func (h *e2eHarness) restartProcess(t *testing.T, name string) {
+	t.Helper()
+	previous := h.processes[name]
+	if previous == nil {
+		t.Fatalf("process %s was not started by this harness", name)
+	}
+	previous.stop()
+	current := h.startProcess(t, fmt.Sprintf("%s-restarted-%d", name, time.Now().UnixNano()), previous.cmd.Dir, previous.logDir, previous.env, previous.cmd.Args...)
+	h.processes[name] = current
+	if previous.cmd.Process.Pid == current.cmd.Process.Pid {
+		t.Fatalf("process %s did not receive a new PID", name)
+	}
 }
 
 func (h *e2eHarness) invokeSigned(ctx context.Context, prop *peer.SignedProposal) (orchestrator.InvocationResponse, error) {
@@ -692,6 +748,19 @@ func (h *e2eHarness) blockQueryConn() (*grpc.ClientConn, error) {
 		return nil, err
 	}
 	return grpc.NewClient("127.0.0.1:4001", grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+}
+
+func (h *e2eHarness) queryServiceClient(t *testing.T) committerpb.QueryServiceClient {
+	t.Helper()
+	connection, err := network.NewPeer(network.PeerConf{Address: "127.0.0.1:7001", TLS: network.TLSConfig{
+		Mode: network.TLSModeMTLS, CertPath: h.orchestratorTLSCert(0), KeyPath: h.orchestratorTLSKey(0),
+		CACertPaths: []string{h.peerMSPTLSCA(0)}, ServerName: "127.0.0.1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	return committerpb.NewQueryServiceClient(connection.Connection())
 }
 
 func assertHeightUnchanged(t *testing.T, h *e2eHarness, before uint64) {

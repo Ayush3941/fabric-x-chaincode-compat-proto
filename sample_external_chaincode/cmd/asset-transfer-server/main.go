@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	ccid := flag.String("ccid", "asset-transfer:1.0", "chaincode ID sent during REGISTER")
+	ccid := flag.String("ccid", "asset-transfer", "chaincode ID sent during REGISTER")
 	address := flag.String("address", "127.0.0.1:10001", "CCAAS listen address")
 	flag.Parse()
 

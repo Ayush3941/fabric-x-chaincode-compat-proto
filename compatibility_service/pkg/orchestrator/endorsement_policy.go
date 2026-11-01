@@ -38,6 +38,7 @@ type verifiedEndorsement struct {
 	result   helperExecutionResult
 	identity msp.Identity
 	key      string
+	mspID    string
 }
 
 func newNamespaceEndorsementPolicy(snapshot NamespacePolicySnapshot, deserializer msp.IdentityDeserializer) (*namespaceEndorsementPolicy, error) {
@@ -173,7 +174,7 @@ func (p *namespaceEndorsementPolicy) inspectPrincipal(principal *mspapi.MSPPrinc
 	return nil
 }
 
-func (p *namespaceEndorsementPolicy) authenticate(result helperExecutionResult, expectedMSP string) (verifiedEndorsement, error) {
+func (p *namespaceEndorsementPolicy) authenticate(result helperExecutionResult, expectedMSP string, requireMSP bool) (verifiedEndorsement, error) {
 	if len(result.Endorsement.Responses) != 1 {
 		return verifiedEndorsement{}, errors.New("expected exactly one execution endorsement")
 	}
@@ -192,8 +193,17 @@ func (p *namespaceEndorsementPolicy) authenticate(result helperExecutionResult, 
 		return verifiedEndorsement{}, errors.New("endorsement namespace or policy version does not match the invocation")
 	}
 	if p.envelope == nil {
-		// A key-based namespace is verified against its configured key below.
-		return verifiedEndorsement{result: result, key: string(response.Endorsement.Endorser)}, nil
+		if !requireMSP {
+			return verifiedEndorsement{result: result, key: string(response.Endorsement.Endorser), mspID: expectedMSP}, nil
+		}
+		// Explicit organization selection can finish without evaluating an MSP
+		// policy, so key-based endorsements must also be authenticated here.
+		if err := p.verifySelection(result.Endorsement, result.TxID); err != nil {
+			return verifiedEndorsement{}, fmt.Errorf("invalid namespace endorsement signature: %w", err)
+		}
+		if p.deserializer == nil {
+			return verifiedEndorsement{}, errors.New("explicit organization selection requires MSP verification")
+		}
 	}
 	serialized := &msppb.Identity{}
 	if err := proto.Unmarshal(response.Endorsement.Endorser, serialized); err != nil {
@@ -220,7 +230,7 @@ func (p *namespaceEndorsementPolicy) authenticate(result helperExecutionResult, 
 		return verifiedEndorsement{}, fmt.Errorf("invalid namespace endorsement signature: %w", err)
 	}
 	id := identity.GetIdentifier()
-	return verifiedEndorsement{result: result, identity: identity, key: id.Mspid + "\x00" + id.Id}, nil
+	return verifiedEndorsement{result: result, identity: identity, key: id.Mspid + "\x00" + id.Id, mspID: identity.GetMSPIdentifier()}, nil
 }
 
 // selectEndorsements searches actual identities without reusing a signer. Each

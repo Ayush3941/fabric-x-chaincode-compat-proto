@@ -25,7 +25,8 @@ inspected with `bin/block-dump`.
 - Policy-aware selection of distinct signing identities and signature verification before submission
 - Two-organization endorsement for namespace `1`
 - Original client proposal signature/MSP verification and invocation permissions
-- Lifecycle package, install, approve, readiness, commit, query, and init gate
+- Fabric Gateway SDK Evaluate, Endorse, Submit, CommitStatus, and ChaincodeEvents using `<name>:<namespace>` routing
+- Lifecycle folder-based install, approve, readiness, commit, query, and init gate
 - Lifecycle commit markers written as Fabric-X transactions
 - Committed lifecycle definitions reloaded from the ledger after restart
 - Static or resolver-based CCAAS endpoint lookup
@@ -141,14 +142,14 @@ the repository root.
 
 ```bash
 cd sample_external_chaincode
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
+./bin/sample-chaincode -ccid sample -address 127.0.0.1:9999
 ```
 
 ### Terminal 2: org1 CCAAS
 
 ```bash
 cd sample_external_chaincode
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:10000
+./bin/sample-chaincode -ccid sample -address 127.0.0.1:10000
 ```
 
 ### Terminal 3: sample resolver
@@ -188,19 +189,17 @@ Useful ports:
 6022   Arma router
 ```
 
-## 4. Package, Install, Approve, Commit
+## 4. Install, Approve, Commit
 
-Run from `compatibility_service` in Terminal 6:
+Run from `compatibility_service` in Terminal 6. Install directly from the CCAAS
+metadata directory; no separate package file is needed.
 
 ```bash
 export FABRIC_LOGGING_SPEC=error
 cd /home/kali/Desktop/LFX/Project/compatibility_service
 
-./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org0_sample --label org0_sample_1 --output ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
-./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org1_sample --label org1_sample_1 --output ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
-
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 ../sample_external_chaincode/cc_package/org0_sample/org0_sample.tgz
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 ../sample_external_chaincode/cc_package/org1_sample/org1_sample.tgz
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 --path ../sample_external_chaincode/cc_go/org0_sample --label org0_sample_1
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 --path ../sample_external_chaincode/cc_go/org1_sample --label org1_sample_1
 
 ORG0_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 | awk -F= '/^package_id=org0_sample_1:/{print $2; exit}')
 ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 | awk -F= '/^package_id=org1_sample_1:/{print $2; exit}')
@@ -216,7 +215,7 @@ ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org
 ./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 
 
 
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
 ```
 
 ## 5. Invoke Compat-v3
@@ -225,7 +224,7 @@ Run from `compatibility_service` in Terminal 6:
 
 ```bash
 mkdir -p ../runtime/compatibility_service
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compat-v3","Args":["asset-multiorg-v3","value-multiorg-v3","asset-multiorg-v3-delete"]}' | tee ../runtime/compatibility_service/compatv3-result.json
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"compat-v3","Args":["asset-multiorg-v3","value-multiorg-v3","asset-multiorg-v3-delete"]}' | tee ../runtime/compatibility_service/compatv3-result.json
 ```
 
 The client prints a larger JSON response. Check these fields:
@@ -246,7 +245,7 @@ The client prints a larger JSON response. Check these fields:
 Run from `compatibility_service`:
 
 ```bash
-./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v3"]}'
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"get","Args":["asset-multiorg-v3"]}'
 ```
 
 Expected:
@@ -258,10 +257,96 @@ value-multiorg-v3
 Run:
 
 ```bash
-./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample -v 1.0 '{"Function":"get","Args":["asset-multiorg-v3-delete"]}'
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"get","Args":["asset-multiorg-v3-delete"]}'
 ```
 
 Expected: empty output.
+
+To use the official Fabric Gateway SDK through the same client binary and
+configuration, run:
+
+```bash
+./bin/client evaluate -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"get","Args":["asset-multiorg-v3"]}'
+./bin/client evaluate -c sampleconfig/client.yaml --namespace 1 -n sample --target-orgs org-1 '{"Function":"get","Args":["asset-multiorg-v3"]}'
+```
+
+The command uses Gateway contract name `sample:1` and returns the original
+chaincode payload. In an application using the Go Gateway SDK:
+
+```go
+network := gateway.GetNetwork("channelqc4")
+contract := network.GetContract("sample:1")
+result, err := contract.EvaluateTransaction("get", "asset-multiorg-v3")
+```
+
+Evaluate executes locally by default. `--target-orgs` selects an organization
+through the existing resolver. Evaluation never submits a transaction; any
+simulated writes or events are discarded.
+
+Gateway `Endorse` executes the same endorsement stage as custom Invoke and
+returns a prepared transaction for the SDK to sign. For example, with the
+Gateway SDK's `client` package imported:
+
+```go
+proposal, err := contract.NewProposal("put", client.WithArguments("asset-gateway-demo", "prepared-value"))
+if err != nil {
+    return err
+}
+transaction, err := proposal.Endorse()
+if err != nil {
+    return err
+}
+result := transaction.Result()
+prepared, err := transaction.Bytes()
+if err != nil {
+    return err
+}
+commit, err := transaction.Submit()
+if err != nil {
+    return err
+}
+txID := commit.TransactionID()
+status, err := commit.Status()
+if err != nil {
+    return err
+}
+// Inspect status.Successful, status.Code, and status.BlockNumber.
+```
+
+Endorsement does not submit the simulated writes. `Submit` verifies the
+client-signed envelope and native endorsements, sends the transaction, and
+returns after ordering acknowledges it. It does not wait for commitment.
+`CommitStatus` returns a recorded validation result immediately, or waits for
+finality within the request deadline. The combined SDK
+`contract.SubmitTransaction("put", "asset-gateway-demo", "committed-value")`
+now runs endorsement, submission, and commit-status checking. A finality
+timeout reports an unknown outcome; it does not reject or resubmit the
+transaction. `ChaincodeEvents` delivers committed events through a separate
+subscription. The existing custom `client invoke` also waits for finality. See
+[Gateway evaluation](docs/architecture.md#gateway-evaluate) and
+[Gateway endorsement](docs/architecture.md#gateway-endorse), followed by
+[Gateway submission](docs/architecture.md#gateway-submit) and
+[Gateway commit status](docs/architecture.md#gateway-commitstatus).
+
+An independent application can listen for events without submitting transactions:
+
+```go
+events, err := network.ChaincodeEvents(ctx, "sample:1")
+if err != nil {
+    return err
+}
+for event := range events {
+    // Process event.EventName, event.Payload, and event.TransactionID.
+}
+```
+
+The default starts at the next committed block. Use `client.WithStartBlock(n)`
+for replay or `client.WithCheckpoint(checkpointer)` to resume. Each subscription
+ends with its context; it does not create an idle transaction tracker. Event
+filtering uses signed logical chaincode identity metadata written by updated
+Orchestrators. Earlier records without that identity are skipped because a
+namespace alone cannot identify the emitting chaincode. See
+[Gateway events](docs/architecture.md#gateway-chaincodeevents).
 
 ## 7. Inspect The Block
 
@@ -285,6 +370,29 @@ read_write key="asset-multiorg-v3" value="value-multiorg-v3"
 read_write key="asset-multiorg-v3-delete" value=<nil>
 ```
 
+## Optional: Upgrade The Compat-v3 Definition
+
+Keep the same chaincode name and application namespace. After the sequence-1
+workflow above, approve and commit sequence `2` with version `2.0`. This example
+reuses the installed runtimes and does not require initialization again:
+
+```bash
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 2.0 --sequence 2 --package-id "$ORG0_PKG"
+./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample -v 2.0 --sequence 2 --package-id "$ORG1_PKG"
+./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 2.0 --sequence 2
+./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample -v 2.0 --sequence 2
+./bin/orchestrator lifecycle querycommitted -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"get","Args":["asset-multiorg-v3"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample '{"Function":"compat-v3","Args":["asset-multiorg-v3","value-after-upgrade","asset-multiorg-v3-delete"]}' | tee ../runtime/compatibility_service/compatv3-result.json
+```
+
+The committed definition reports version `2.0`, sequence `2`. The query still
+returns `value-multiorg-v3`; the invocation reports that previous committed value
+and then updates it. Inspect the new block using step 7. Client calls do not need
+a version flag. The next definition update uses sequence `3`, regardless of its
+version label. See [lifecycle metadata migration](docs/lifecycle.md#commit) when
+upgrading a ledger created with the earlier `name:version` prototype.
+
 ## Optional: Fabric Samples Asset Transfer
 
 This runs the actual Go [Asset Transfer Basic contract](sample_external_chaincode/asset_transfer/README.md)
@@ -292,7 +400,7 @@ from Fabric Samples, with unchanged business logic. A small launcher serves
 the Fabric Contract API chaincode through CCAAS.
 
 Use the network and service setup in steps 1–3 above. The sample orchestrator
-configs already route `asset-transfer:1.0` to the two endpoints below; restart
+configs already route the committed `asset-transfer` definition to the two endpoints below; restart
 the orchestrators if they were started before this configuration was added.
 The existing resolver and compatibility sample can continue running.
 
@@ -301,13 +409,13 @@ Start two additional service terminals, each from the repository root:
 ```bash
 # org0 asset-transfer CCAAS
 cd sample_external_chaincode
-./bin/asset-transfer-chaincode -ccid 'asset-transfer:1.0' -address 127.0.0.1:10001
+./bin/asset-transfer-chaincode -ccid asset-transfer -address 127.0.0.1:10001
 ```
 
 ```bash
 # org1 asset-transfer CCAAS
 cd sample_external_chaincode
-./bin/asset-transfer-chaincode -ccid 'asset-transfer:1.0' -address 127.0.0.1:10002
+./bin/asset-transfer-chaincode -ccid asset-transfer -address 127.0.0.1:10002
 ```
 
 Run the normal lifecycle commands from `compatibility_service` in the client
@@ -318,11 +426,8 @@ packages do not affect which package is approved:
 export FABRIC_LOGGING_SPEC=error
 mkdir -p ../runtime/compatibility_service/asset-transfer
 
-./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org0_asset_transfer --label org0_asset_transfer_1 --output ../sample_external_chaincode/cc_package/org0_asset_transfer/org0_asset_transfer.tgz
-./bin/orchestrator lifecycle package --path ../sample_external_chaincode/cc_go/org1_asset_transfer --label org1_asset_transfer_1 --output ../sample_external_chaincode/cc_package/org1_asset_transfer/org1_asset_transfer.tgz
-
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 ../sample_external_chaincode/cc_package/org0_asset_transfer/org0_asset_transfer.tgz | tee ../runtime/compatibility_service/asset-transfer/install-org0.txt
-./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 ../sample_external_chaincode/cc_package/org1_asset_transfer/org1_asset_transfer.tgz | tee ../runtime/compatibility_service/asset-transfer/install-org1.txt
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 --path ../sample_external_chaincode/cc_go/org0_asset_transfer --label org0_asset_transfer_1 | tee ../runtime/compatibility_service/asset-transfer/install-org0.txt
+./bin/orchestrator lifecycle install -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 --path ../sample_external_chaincode/cc_go/org1_asset_transfer --label org1_asset_transfer_1 | tee ../runtime/compatibility_service/asset-transfer/install-org1.txt
 
 ORG0_ASSET_PKG=$(awk -F= '/^package_id=/{print $2; exit}' ../runtime/compatibility_service/asset-transfer/install-org0.txt)
 ORG1_ASSET_PKG=$(awk -F= '/^package_id=/{print $2; exit}' ../runtime/compatibility_service/asset-transfer/install-org1.txt)
@@ -348,13 +453,13 @@ Create an asset owned by Alice, query it, then transfer it to Bob:
 ASSET_ID="asset-transfer-$(date +%s)"
 printf '%s\n' "$ASSET_ID" > ../runtime/compatibility_service/asset-transfer/asset-id.txt
 
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n asset-transfer -v 1.0 "{\"Function\":\"CreateAsset\",\"Args\":[\"$ASSET_ID\",\"blue\",\"5\",\"Alice\",\"300\"]}" | tee ../runtime/compatibility_service/asset-transfer/create-result.json
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n asset-transfer "{\"Function\":\"CreateAsset\",\"Args\":[\"$ASSET_ID\",\"blue\",\"5\",\"Alice\",\"300\"]}" | tee ../runtime/compatibility_service/asset-transfer/create-result.json
 
-./bin/client query -c sampleconfig/client.yaml --namespace 1 -n asset-transfer -v 1.0 "{\"Function\":\"ReadAsset\",\"Args\":[\"$ASSET_ID\"]}"
+./bin/client query -c sampleconfig/client.yaml --namespace 1 -n asset-transfer "{\"Function\":\"ReadAsset\",\"Args\":[\"$ASSET_ID\"]}"
 
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n asset-transfer -v 1.0 "{\"Function\":\"TransferAsset\",\"Args\":[\"$ASSET_ID\",\"Bob\"]}" | tee ../runtime/compatibility_service/asset-transfer/transfer-result.json
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n asset-transfer "{\"Function\":\"TransferAsset\",\"Args\":[\"$ASSET_ID\",\"Bob\"]}" | tee ../runtime/compatibility_service/asset-transfer/transfer-result.json
 
-./bin/client query -c sampleconfig/client-org1.yaml --namespace 1 -n asset-transfer -v 1.0 "{\"Function\":\"ReadAsset\",\"Args\":[\"$ASSET_ID\"]}" | tee ../runtime/compatibility_service/asset-transfer/read-after-transfer.json
+./bin/client query -c sampleconfig/client-org1.yaml --namespace 1 -n asset-transfer "{\"Function\":\"ReadAsset\",\"Args\":[\"$ASSET_ID\"]}" | tee ../runtime/compatibility_service/asset-transfer/read-after-transfer.json
 ```
 
 Both invoke results must show `submitted: true` and
@@ -380,9 +485,9 @@ For another run, use a new `ASSET_ID`. Committed definitions are restored from
 the ledger after an orchestrator restart; installed packages and approvals are
 not restored. The asset-transfer static resolver entries still locate its
 runtimes, so this demo can continue invoking the committed definition without
-another install, approval, or commitment. The current lifecycle implementation
-requires the next sequence for a new approval after restart; do not repeat
-sequence-1 approvals against a definition that is already committed.
+another install, approval, or commitment. Reinstalling and approving the exact
+committed definition can restore its org-local package binding. Committing an
+upgrade requires the current sequence plus one, even when the version changes.
 
 ## Optional: Init-Required Lifecycle
 
@@ -399,8 +504,8 @@ ORG1_PKG=$(./bin/orchestrator lifecycle queryinstalled -c sampleconfig/admin-org
 ./bin/orchestrator lifecycle approveformyorg -c sampleconfig/admin-org1.yaml --host 127.0.0.1:9202 -n sample-init -v 1.0 --sequence 1 --package-id "$ORG1_PKG" --init-required
 ./bin/orchestrator lifecycle checkcommitreadiness -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
 ./bin/orchestrator lifecycle commit -c sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 -n sample-init -v 1.0 --sequence 1 --init-required
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
-./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init -v 1.0 '{"Function":"compat-v3","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init --is-init '{"Function":"initialize","Args":["asset-init-demo","value-init-demo"]}'
+./bin/client invoke -c sampleconfig/client.yaml --namespace 1 -n sample-init '{"Function":"compat-v3","Args":["asset-after-init","value-after-init","asset-after-init-delete"]}'
 ```
 
 ## Optional: Multi-Orchestrator Candidate Routing
@@ -425,7 +530,7 @@ candidates:
 
 ```bash
 cd compatibility_service
-./bin/client invoke -c sampleconfig/client-org1.yaml --namespace 1 -n sample -v 1.0 '{"Function":"compat-v3","Args":["asset-org1-route","value-org1-route","asset-org1-route-delete"]}'
+./bin/client invoke -c sampleconfig/client-org1.yaml --namespace 1 -n sample '{"Function":"compat-v3","Args":["asset-org1-route","value-org1-route","asset-org1-route-delete"]}'
 ```
 
 The org1 orchestrator log should include:
@@ -443,7 +548,7 @@ prints the client JSON response.
 Useful lines:
 
 ```text
-[orchestrator] ProcessProposal -> tx=... namespace=1 chaincode=sample:1.0 fn=compat-v3
+[orchestrator] ProcessProposal -> tx=... namespace=1 chaincode=sample version=1.0 fn=compat-v3
 [shim] Execute -> tx=... ccaas connect endpoint=127.0.0.1:9999
 [helper] ProcessProposal -> tx=... chaincode execution completed status=200
 [orchestrator] submitAndWaitFinality -> tx=... finality status=COMMITTED block=...
@@ -464,6 +569,79 @@ Run real-network integration tests after setup:
 cd compatibility_service
 go test -tags=e2e ./integration/e2e -count=1 -v
 ```
+
+To run the sample `compat-v3` lifecycle upgrade simulation on its own:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestLifecycleUpgradeUsesNameAndSequenceWithCompatV3$' -count=1 -v
+```
+
+It commits versions `1.0`, `2.0`, and `2.1` at sequences `1`, `2`, and `3`, invokes
+without a client version flag, verifies preserved state and both endorsements,
+and checks startup hydration. Results and the actual block are saved under
+`runtime/compatibility_service/lifecycle-upgrade/`.
+
+To verify the Gateway SDK, its CLI command, binary responses, remote targeting,
+authorization, and evaluation without ledger updates:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestGatewayEvaluateSDK$' -count=1 -v
+```
+
+The test commits its setup data, then verifies that all evaluations leave the
+ledger height unchanged. It also restarts both Orchestrators and both CCaaS
+services on the same ports, reuses the SDK connection, and checks definition
+reload and static endpoint resolution without reinstalling packages. Its report is saved under
+`runtime/compatibility_service/gateway-evaluate/`.
+
+To verify Gateway endorsement, native signatures, SDK transaction parsing and
+client signing, restart recovery, and continued custom Invoke commitment:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestGatewayEndorseSDK$' -count=1 -v
+```
+
+This test checks that endorsement leaves the ledger height unchanged, restarts
+both Orchestrators, and then commits through custom Invoke. Its report and a
+signed prepared transaction are saved under
+`runtime/compatibility_service/gateway-endorse/`.
+
+To verify SDK submission, client authorization, exact native transaction bytes,
+and duplicate handling:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestGatewaySubmitSDK$' -count=1 -v
+```
+
+This test endorses through org0, restarts org1, stops both CCaaS services, and
+submits the prepared transaction through org1. It checks actual commitment with
+the Fabric-X Query Service, compares the signed native bytes with the block,
+and verifies that retries submit only once. Reports and protobuf evidence are
+saved under `runtime/compatibility_service/gateway-submit/`.
+
+To verify SDK commit status before submission, after finality, and through a
+different restarted Orchestrator, including rejected transactions, missed
+notifications, request timeouts, and the complete SDK submit-and-wait flow:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestGatewayCommitStatus(SDK|MissedNotification)$' -count=1 -v
+```
+
+These tests use the existing network and isolate notification faults in a test
+proxy. Results and a real committed block are saved under
+`runtime/compatibility_service/gateway-commit-status/`.
+
+To verify live SDK events, filtering between chaincodes sharing a namespace,
+custom Invoke event delivery, and replay/checkpoints through a restarted
+Orchestrator with CCaaS stopped:
+
+```bash
+go test -tags=e2e ./integration/e2e -run '^TestGatewayChaincodeEventsSDK$' -count=1 -v
+```
+
+This uses the existing `compat-v3` chaincode function and the normal folder
+installation lifecycle. Reports and both committed blocks are saved under
+`runtime/compatibility_service/gateway-events/`.
 
 The integration tests start their own orchestrators and CCAAS processes against
 the running Fabric-X network. To verify original-client authentication and
@@ -533,8 +711,9 @@ Full cleanup:
   `-org1-orchestrator` values and returns them as ordered candidates.
 - The resolver is user-owned. Production routing, health checks, region
   selection, and load preference belong behind that API.
-- Current lifecycle identity is `name:version`; `sequence` is the upgrade
-  counter for that chaincode identity.
+- Lifecycle identity is channel plus chaincode name. Version is descriptive;
+  sequence is the revision counter across versions. Invocations use the active
+  definition by name and keep the requested Fabric-X application namespace.
 
 Additional developer notes:
 

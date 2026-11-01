@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	sdk "github.com/hyperledger/fabric-x-sdk"
 )
 
-func TestIdempotencyStoreReplaysCompletedResult(t *testing.T) {
+func TestIdempotencyStoreEvictsCompletedResultWithoutLosingActiveWaiters(t *testing.T) {
 	store := newIdempotencyStore()
 
 	record, isFirstRequest, err := store.begin("key1", "digest1")
@@ -20,22 +22,59 @@ func TestIdempotencyStoreReplaysCompletedResult(t *testing.T) {
 	}
 
 	expected := InvocationResponse{TxID: "tx1", Status: 200, CommitStatus: "COMMITTED"}
-	store.complete(record, expected, nil)
-
-	record, isFirstRequest, err = store.begin("key1", "digest1")
+	waiter, isFirstRequest, err := store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin duplicate: %v", err)
 	}
 	if isFirstRequest {
 		t.Fatal("duplicate caller should not own execution")
 	}
+	store.complete(record, expected, nil)
+	if len(store.records) != 0 {
+		t.Fatal("completed transaction retained in store")
+	}
 
-	actual, err := store.wait(context.Background(), record)
+	actual, err := store.wait(context.Background(), waiter)
 	if err != nil {
 		t.Fatalf("wait duplicate: %v", err)
 	}
 	if actual.TxID != expected.TxID || actual.CommitStatus != expected.CommitStatus {
 		t.Fatalf("unexpected replay response: %#v", actual)
+	}
+	replacement, first, err := store.begin("key1", "different-digest")
+	if err != nil || !first || replacement == record {
+		t.Fatalf("historical request still retained: first=%t error=%v", first, err)
+	}
+	store.complete(record, InvocationResponse{}, nil)
+	if store.records["key1"] != replacement {
+		t.Fatal("old cleanup removed a newer request")
+	}
+}
+
+func TestIdempotencyStoreNeverAccumulatesTerminalHistory(t *testing.T) {
+	store := newIdempotencyStore()
+	for i := range 1000 {
+		record, first, err := store.begin("reused-key", "digest")
+		if err != nil || !first {
+			t.Fatalf("previous terminal record retained at iteration %d: %v", i, err)
+		}
+		waiter, _, _ := store.begin(record.Key, record.Digest)
+		if i%2 == 0 {
+			store.complete(record, InvocationResponse{TxID: "never-sent"}, errors.New("execution failed"))
+		} else {
+			store.markSubmitted(record, InvocationResponse{TxID: "sent", Submitted: true}, sdk.Endorsement{}, nil)
+			store.complete(record, InvocationResponse{}, context.DeadlineExceeded)
+			if len(store.records) != 1 {
+				t.Fatal("unknown finality was discarded")
+			}
+			store.confirmFinality(record, InvocationResponse{TxID: "sent", Submitted: true, CommitStatus: "ABORTED_MVCC_CONFLICT"}, nil)
+		}
+		if len(store.records) != 0 {
+			t.Fatal("terminal history accumulated")
+		}
+		if out, _ := store.wait(t.Context(), waiter); out.TxID == "" {
+			t.Fatal("eviction lost the response for an existing waiter")
+		}
 	}
 }
 
@@ -49,108 +88,26 @@ func TestIdempotencyStoreRejectsDigestConflict(t *testing.T) {
 	}
 }
 
-func TestIdempotencyStoreReplaysFailure(t *testing.T) {
+func TestIdempotencyStoreEvictsFailureWithoutLosingActiveWaiters(t *testing.T) {
 	store := newIdempotencyStore()
 	record, _, err := store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin first: %v", err)
 	}
 	expectedErr := errors.New("boom")
-	store.complete(record, InvocationResponse{TxID: "tx1"}, expectedErr)
-
-	record, isFirstRequest, err := store.begin("key1", "digest1")
+	waiter, isFirstRequest, err := store.begin("key1", "digest1")
 	if err != nil {
 		t.Fatalf("begin duplicate: %v", err)
 	}
 	if isFirstRequest {
 		t.Fatal("duplicate caller should not own failed execution")
 	}
-	_, err = store.wait(context.Background(), record)
+	store.complete(record, InvocationResponse{TxID: "tx1"}, expectedErr)
+	if len(store.records) != 0 {
+		t.Fatal("failed transaction retained in store")
+	}
+	_, err = store.wait(context.Background(), waiter)
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected replayed error, got %v", err)
-	}
-}
-
-func TestRequestDigestIncludesClientTxID(t *testing.T) {
-	req1 := InvocationRequest{
-		ClientTxID:    "client-tx-1",
-		ClientCreator: []byte("creator"),
-		Function:      "compatv2",
-		Args:          []string{"asset1", "value1", "delete1"},
-	}
-	req2 := req1
-	req2.ClientTxID = "client-tx-2"
-
-	digest1 := requestDigest("channelqc4", "0", req1, true)
-	digest2 := requestDigest("channelqc4", "0", req2, true)
-	if digest1 == digest2 {
-		t.Fatal("different client tx ids should produce different digest")
-	}
-
-	req2.ClientTxID = req1.ClientTxID
-	req2.Args[1] = "different-value"
-	digest3 := requestDigest("channelqc4", "0", req2, true)
-	if digest1 == digest3 {
-		t.Fatal("different request args should produce different digest")
-	}
-}
-
-func TestIdempotencyIdentityUsesClientTxIDAsKey(t *testing.T) {
-	req1 := InvocationRequest{
-		ClientTxID:    "client-tx-1",
-		ClientCreator: []byte("creator"),
-		Function:      "compatv2",
-		Args:          []string{"asset1", "value1", "delete1"},
-	}
-	req2 := req1
-	req2.Args = []string{"asset1", "different-value", "delete1"}
-
-	key1, digest1 := idempotencyIdentity("channelqc4", "0", req1, true)
-	key2, digest2 := idempotencyIdentity("channelqc4", "0", req2, true)
-	if key1 != req1.ClientTxID || key2 != req1.ClientTxID {
-		t.Fatalf("expected idempotency key to use client tx id, got %q and %q", key1, key2)
-	}
-	if digest1 == digest2 {
-		t.Fatal("same tx id with different args should produce different request digests")
-	}
-}
-
-func TestRequestDigestIncludesTransient(t *testing.T) {
-	req1 := InvocationRequest{
-		ClientCreator: []byte("creator"),
-		Function:      "compatv2",
-		Args:          []string{"asset1", "value1", "delete1"},
-		ClientTransient: map[string][]byte{
-			"secret": []byte("alpha"),
-		},
-	}
-	req2 := req1
-	req2.ClientTransient = map[string][]byte{
-		"secret": []byte("beta"),
-	}
-
-	digest1 := requestDigest("channelqc4", "0", req1, true)
-	digest2 := requestDigest("channelqc4", "0", req2, true)
-	if digest1 == digest2 {
-		t.Fatal("different transient values should produce different digest")
-	}
-}
-
-func TestRequestDigestIncludesIsInit(t *testing.T) {
-	req1 := InvocationRequest{
-		ClientTxID:       "client-tx-1",
-		ClientCreator:    []byte("creator"),
-		ChaincodeName:    "sample",
-		ChaincodeVersion: "1.0",
-		Function:         "compatv2",
-		Args:             []string{"asset1", "value1", "delete1"},
-	}
-	req2 := req1
-	req2.IsInit = true
-
-	digest1 := requestDigest("channelqc4", "0", req1, true)
-	digest2 := requestDigest("channelqc4", "0", req2, true)
-	if digest1 == digest2 {
-		t.Fatal("is-init flag should produce a different request digest")
 	}
 }

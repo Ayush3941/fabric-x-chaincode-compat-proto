@@ -485,7 +485,7 @@ func (c *SimpleKVChaincode) Invoke(stub shim.ChaincodeStubInterface) *pb.Respons
 }
 
 func main() {
-	ccid := flag.String("ccid", getenv("CHAINCODE_ID", "0:sample"), "chaincode ID sent during REGISTER")
+	ccid := flag.String("ccid", getenv("CHAINCODE_ID", "sample"), "chaincode ID sent during REGISTER")
 	address := flag.String("address", getenv("CHAINCODE_ADDRESS", "127.0.0.1:9999"), "listen address")
 	flag.Parse()
 

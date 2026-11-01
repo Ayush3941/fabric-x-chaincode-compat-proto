@@ -8,6 +8,7 @@ module compatibility_service
 go 1.26.8
 
 require (
+	github.com/hyperledger/fabric-gateway v1.12.1
 	github.com/hyperledger/fabric-lib-go v1.1.5-0.20260708100132-163bcc919208
 	github.com/hyperledger/fabric-protos-go-apiv2 v0.3.7
 	github.com/hyperledger/fabric-x-committer v1.0.4
@@ -15,7 +16,7 @@ require (
 	github.com/hyperledger/fabric-x-sdk v0.1.1-0.20260929101041-f5b45c286a8f
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.53.0
 )
 
@@ -60,6 +61,7 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260706201446-f0a921348800 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

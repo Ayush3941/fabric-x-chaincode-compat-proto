@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -72,19 +71,19 @@ func (l *lifecycleTestLedger) CommitLifecycleDefinition(_ context.Context, def C
 }
 func (l *lifecycleTestLedger) ReadLifecycleDefinition(_ context.Context, def ChaincodeDefinition) (LedgerDefinition, bool, error) {
 	l.reads++
-	v, ok := l.entries[LedgerKey(def)]
+	v, ok := l.entries[LedgerKey("channelqc4", def.Name)]
 	return v, ok, l.readErr
 }
 func (l *lifecycleTestLedger) put(def ChaincodeDefinition, initialized bool) {
 	if l.entries == nil {
 		l.entries = map[string]LedgerDefinition{}
 	}
-	l.entries[LedgerKey(def)] = LedgerDefinition{CCID: DefinitionCCID(def), Name: def.Name, Version: def.Version, Sequence: def.Sequence, InitRequired: def.InitRequired, Initialized: initialized}
+	l.entries[LedgerKey("channelqc4", def.Name)] = LedgerDefinition{ChannelID: "channelqc4", Name: def.Name, Version: def.Version, Sequence: def.Sequence, InitRequired: def.InitRequired, Initialized: initialized}
 }
 
 func lifecycleTestServer(t *testing.T, f *lifecycleAuthFixture, org int, ledger LedgerBackend, remotes ...RemotePeer) *Server {
 	t.Helper()
-	store, err := NewMemoryStore()
+	store, err := NewMemoryStore("channelqc4")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +112,7 @@ func TestInternalLifecycleUpdatesRequireCommittedLedgerState(t *testing.T) {
 	if _, err := server.Commit(t.Context(), commit); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("uncommitted definition applied: %v", err)
 	}
-	if _, ok, _ := server.store.GetCommitted(t.Context(), def.Name, def.Version); ok {
+	if _, ok, _ := server.store.GetCommitted(t.Context(), def.Name); ok {
 		t.Fatal("uncommitted definition changed local state")
 	}
 	ledger.put(def, false)
@@ -124,7 +123,7 @@ func TestInternalLifecycleUpdatesRequireCommittedLedgerState(t *testing.T) {
 	if _, err := server.MarkInitialized(t.Context(), init); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("uncommitted initialization applied: %v", err)
 	}
-	committed, _, _ := server.store.GetCommitted(t.Context(), def.Name, def.Version)
+	committed, _, _ := server.store.GetCommitted(t.Context(), def.Name)
 	if committed.Initialized {
 		t.Fatal("unconfirmed initialization changed local state")
 	}
@@ -142,7 +141,7 @@ func TestInternalLifecycleUpdatesRequireCommittedLedgerState(t *testing.T) {
 	if _, err := server.MarkInitialized(t.Context(), init); err != nil {
 		t.Fatal(err)
 	}
-	committed, _, _ = server.store.GetCommitted(t.Context(), def.Name, def.Version)
+	committed, _, _ = server.store.GetCommitted(t.Context(), def.Name)
 	if !committed.Initialized || ledger.submits != 0 {
 		t.Fatalf("internal update must only mirror confirmed ledger state: %+v submits=%d", committed, ledger.submits)
 	}
@@ -175,16 +174,12 @@ func TestLifecycleAdministrativeWorkflowAndSignedCoordination(t *testing.T) {
 	def := ChaincodeDefinition{Name: "sample", Version: "1.0", Sequence: 1}
 	source := t.TempDir()
 	writeTestFile(t, filepath.Join(source, "connection.json"), "{\"address\":\"127.0.0.1:9999\",\"tls_required\":false}")
-	pkg, err := PackageExternalChaincode(PackageOptions{SourceDir: source, OutputPath: filepath.Join(t.TempDir(), "sample.tgz"), Label: "sample"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	archive, err := os.ReadFile(pkg.Output)
+	pkg, err := BuildExternalChaincodePackage(PackageOptions{SourceDir: source, Label: "sample"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for org, node := range []*Server{server, remote.server} {
-		installed, err := node.Install(t.Context(), signedLifecycleTestRequest(t, f.admins[org].Signer, InstallRequest{Package: archive}, false))
+		installed, err := node.Install(t.Context(), signedLifecycleTestRequest(t, f.admins[org].Signer, InstallRequest{Package: pkg.PackageTGZ}, false))
 		if err != nil || installed.Package.PackageID != pkg.PackageID {
 			t.Fatalf("admin install failed: %v %v", installed, err)
 		}
@@ -216,5 +211,56 @@ func TestLifecycleAdministrativeWorkflowAndSignedCoordination(t *testing.T) {
 		if !req.Internal || !bytes.Equal(req.Creator, creator) {
 			t.Fatal("original public request was reused for internal coordination")
 		}
+	}
+}
+
+type recoveringLifecycleRemote struct {
+	RemotePeer
+	mspID string
+	fail  bool
+	calls int
+}
+
+func (r *recoveringLifecycleRemote) MSPID() string { return r.mspID }
+func (r *recoveringLifecycleRemote) Commit(context.Context, *SignedRequest) (*CommitResponse, error) {
+	r.calls++
+	if r.fail {
+		return nil, errors.New("remote temporarily unavailable")
+	}
+	return &CommitResponse{}, nil
+}
+func (r *recoveringLifecycleRemote) MarkInitialized(context.Context, *SignedRequest) (*MarkInitializedResponse, error) {
+	r.calls++
+	if r.fail {
+		return nil, errors.New("remote temporarily unavailable")
+	}
+	return &MarkInitializedResponse{}, nil
+}
+
+func TestLifecycleReconciliationRetriesOnlyUnfinishedOrganizations(t *testing.T) {
+	for _, initialized := range []bool{false, true} {
+		t.Run(map[bool]string{false: "definition", true: "initialization"}[initialized], func(t *testing.T) {
+			f := newLifecycleAuthFixture(t)
+			ledger := &lifecycleTestLedger{}
+			def := ChaincodeDefinition{Name: "sample", Version: "1.0", Sequence: 1, InitRequired: initialized}
+			ledger.put(def, true)
+			first := &recoveringLifecycleRemote{mspID: "org-1"}
+			second := &recoveringLifecycleRemote{mspID: "org-2", fail: true}
+			server := lifecycleTestServer(t, f, 0, ledger, first, second)
+			progress := &DefinitionPropagation{}
+			if _, err := server.ReconcileDefinition(t.Context(), def, initialized, progress); err == nil {
+				t.Fatal("failed propagation was considered complete")
+			}
+			if len(progress.Organizations) != 1 || progress.Organizations[0] != "org-2" {
+				t.Fatalf("finished organizations retained: %+v", progress)
+			}
+			second.fail = false
+			if _, err := server.ReconcileDefinition(t.Context(), def, initialized, progress); err != nil {
+				t.Fatal(err)
+			}
+			if first.calls != 1 || second.calls != 2 || progress.Organizations != nil || ledger.submits != 0 {
+				t.Fatal("reconciliation repeated successful work, wrote a transaction, or retained finished organizations")
+			}
+		})
 	}
 }

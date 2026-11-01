@@ -19,10 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"compatibility_service/pkg/lifecycle"
 	"compatibility_service/pkg/orchestrator"
+	gwclient "github.com/hyperledger/fabric-gateway/pkg/client"
 	"github.com/hyperledger/fabric-x-common/api/applicationpb"
 	"github.com/hyperledger/fabric-x-common/api/committerpb"
-	"github.com/hyperledger/fabric-x-sdk/network"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -107,21 +108,30 @@ func TestLazyFinalityReconcilesStoreWithoutChangingNextResponse(t *testing.T) {
 				t.Fatal("new submission did not reconcile the older transaction once")
 			}
 
-			// Asking for A explicitly now reads the already-updated record. A is
-			// absent from subsequent status queries, proving B refreshed the store.
-			finalA, err := h.invokeSigned(ctx, proposalA)
-			if err != nil || finalA.TxID != txA || finalA.CommitStatus != "COMMITTED" || finalA.BlockNum != committedA.Ref.BlockNum || !finalA.IdempotentReplay || finalA.ChaincodeEvent == nil {
-				t.Fatalf("older record was not refreshed: %+v err=%v", finalA, err)
+			// Completed responses are not replayed from local history. Wait for the
+			// asynchronous cleanup evidence, and use the ledger for old outcomes.
+			logPath := filepath.Join(h.root, "runtime", "compatibility_service", "e2e", sanitize(t.Name())+"-orchestrator-org0.log")
+			var log []byte
+			for deadline := time.Now().Add(5 * time.Second); ; {
+				log, err = os.ReadFile(logPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(log), "tx="+txA+" finality status=COMMITTED") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("asynchronous cleanup did not confirm A")
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
-			if h.finalityProxy.callsFor(txA) != 1 {
-				t.Fatal("older record was queried again instead of using the refreshed store")
-			}
+			finalA := committedA.Ref
+
 			committedB := h.waitForLedgerStatus(t, ctx, txB)
 			if after := h.waitForHeight(t, committedB.Ref.BlockNum+1); after != before+2 {
 				t.Fatalf("expected two transactions in two new blocks: before=%d after=%d", before, after)
 			}
-			logPath := filepath.Join(h.root, "runtime", "compatibility_service", "e2e", sanitize(t.Name())+"-orchestrator-org0.log")
-			log, err := os.ReadFile(logPath)
+			log, err = os.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -135,15 +145,15 @@ func TestLazyFinalityReconcilesStoreWithoutChangingNextResponse(t *testing.T) {
 			}
 			maintenance := strings.Index(string(log), "tx="+txA+" finality status=COMMITTED")
 			newSubmission := strings.Index(string(log), "tx="+txB+" submitting endorsed")
-			if maintenance < 0 || maintenance > newSubmission {
-				t.Fatal("older status was not refreshed during the new submission")
+			if maintenance < 0 || newSubmission < 0 {
+				t.Fatal("missing asynchronous maintenance or new submission evidence")
 			}
 
 			dir := filepath.Join(h.root, "runtime", "compatibility_service", "lazy-finality")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			evidence, err := json.MarshalIndent(map[string]any{"scenario": name, "original_response": pending, "refreshed_record": finalA, "next_submission_response": responseB, "next_submission_block": committedB.Ref.BlockNum, "idle_status_queries": 0, "submissions_per_transaction": 1}, "", "  ")
+			evidence, err := json.MarshalIndent(map[string]any{"scenario": name, "original_response": pending, "ledger_outcome": committedA, "terminal_history_retained": false, "next_submission_response": responseB, "next_submission_block": committedB.Ref.BlockNum, "idle_status_queries": 0, "submissions_per_transaction": 1}, "", "  ")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -157,8 +167,14 @@ func TestLazyFinalityReconcilesStoreWithoutChangingNextResponse(t *testing.T) {
 
 func (h *e2eHarness) waitForLedgerStatus(t *testing.T, ctx context.Context, txID string) *committerpb.TxStatus {
 	t.Helper()
+	var query committerpb.QueryServiceClient
+	if h.finalityProxy != nil {
+		query = h.finalityProxy.upstream
+	} else {
+		query = h.queryServiceClient(t)
+	}
 	for ctx.Err() == nil {
-		response, err := h.finalityProxy.upstream.GetTransactionStatus(ctx, &committerpb.TxStatusQuery{TxIds: []string{txID}})
+		response, err := query.GetTransactionStatus(ctx, &committerpb.TxStatusQuery{TxIds: []string{txID}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,17 +192,120 @@ func (h *e2eHarness) waitForLedgerStatus(t *testing.T, ctx context.Context, txID
 	return nil
 }
 
+func TestGatewayCommitStatusMissedNotification(t *testing.T) {
+	name := fmt.Sprintf("gateway_status_fallback_%d", time.Now().UnixNano())
+	h := newHarness(t, harnessOptions{
+		name: "gateway-status-fallback", sampleChaincode: true, requestWait: "45s", finality: "25s",
+		chaincodeDefinition: &lifecycle.ChaincodeDefinition{Name: name, Version: "1.0", Sequence: 1},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	h.deployGatewayDefinition(t, ctx, name, "1.0")
+	// Reuse the finality fault-injection server, forwarding real query results
+	// but deliberately withholding every notification for this instance.
+	configPath := h.processes["orchestrator-org0"].cmd.Args[2]
+	h.finalityProxy = h.startDeferredFinality(t, configPath)
+	h.finalityProxy.visible.Store(true)
+	h.finalityProxy.holdNotifications.Store(true)
+	h.restartProcess(t, "orchestrator-org0")
+	waitForPort(t, h.ports.org0Orch)
+	client := h.gatewaySDK(t, 0, 0)
+	contract := client.GetNetwork(channelID).GetContract(name + ":" + namespace)
+	proposal, err := contract.NewProposal("put", gwclient.WithArguments(uniqueKey(t, "status-fallback"), "committed-despite-missed-event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := proposal.EndorseWithContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := client.NewCommit(h.gatewayStatusBytes(t, 0, proposal.TransactionID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type statusResult struct {
+		status *gwclient.Status
+		err    error
+	}
+	done := make(chan statusResult, 1)
+	go func() { result, err := commit.StatusWithContext(ctx); done <- statusResult{result, err} }()
+	waitForActive := func(want int32) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if h.finalityProxy.activeSubscriptions.Load() == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("active notification subscriptions=%d, want %d", h.finalityProxy.activeSubscriptions.Load(), want)
+	}
+	waitForActive(1)
+	if _, err := transaction.SubmitWithContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	native := h.waitForLedgerStatus(t, ctx, proposal.TransactionID())
+	var result *gwclient.Status
+	select {
+	case outcome := <-done:
+		if outcome.err != nil || !outcome.status.Successful || outcome.status.BlockNumber != native.Ref.BlockNum {
+			t.Fatalf("missed event prevented finality recovery: %+v %v", outcome.status, outcome.err)
+		}
+		result = outcome.status
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	waitForActive(0)
+	if h.finalityProxy.callsFor(proposal.TransactionID()) < 3 {
+		t.Fatal("test never exercised a fallback status query")
+	}
+	unknownID := uniqueKey(t, "unsubmitted-status")
+	unknown, err := client.NewCommit(h.gatewayStatusBytes(t, 0, unknownID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, cancelShort := context.WithTimeout(ctx, 180*time.Millisecond)
+	_, err = unknown.StatusWithContext(short)
+	cancelShort()
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("unknown transaction was treated as final: %v", err)
+	}
+	waitForActive(0)
+	before := h.finalityProxy.queryCount()
+	time.Sleep(1200 * time.Millisecond)
+	if h.finalityProxy.queryCount() != before {
+		t.Fatal("status polling continued without an active client request")
+	}
+	dir := filepath.Join(h.root, "runtime", "compatibility_service", "gateway-commit-status")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := json.MarshalIndent(map[string]any{
+		"status": result, "notifications_deliberately_withheld": true,
+		"status_queries": h.finalityProxy.callsFor(proposal.TransactionID()), "unknown_transaction_result": "DEADLINE_EXCEEDED",
+		"active_subscriptions_after_requests": 0, "idle_status_queries": 0,
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "missed-notifications.json"), append(report, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Gateway status recovered block=%d tx=%s with all notifications withheld; timeout left no subscriptions or idle queries", result.BlockNumber, proposal.TransactionID())
+}
+
 // deferredFinalityService forwards real state/policy queries, withholds
 // transaction statuses until released, and times out notification subscriptions.
 // Fault injection is confined to this test server and temporary harness config.
 type deferredFinalityService struct {
 	committerpb.UnimplementedQueryServiceServer
 	committerpb.UnimplementedNotifierServer
-	upstream          committerpb.QueryServiceClient
-	visible           atomic.Bool
-	holdNotifications atomic.Bool
-	mu                sync.Mutex
-	queries           map[string]int
+	upstream            committerpb.QueryServiceClient
+	visible             atomic.Bool
+	holdNotifications   atomic.Bool
+	activeSubscriptions atomic.Int32
+	mu                  sync.Mutex
+	queries             map[string]int
 }
 
 func (p *deferredFinalityService) GetRows(ctx context.Context, query *committerpb.Query) (*committerpb.Rows, error) {
@@ -222,6 +341,8 @@ func (p *deferredFinalityService) OpenNotificationStream(stream grpc.BidiStreami
 	if err != nil {
 		return err
 	}
+	p.activeSubscriptions.Add(1)
+	defer p.activeSubscriptions.Add(-1)
 	if p.holdNotifications.Load() {
 		<-stream.Context().Done()
 		return stream.Context().Err()
@@ -247,25 +368,17 @@ func (p *deferredFinalityService) queryCount() int {
 
 func (h *e2eHarness) startDeferredFinality(t *testing.T, configPath string) *deferredFinalityService {
 	t.Helper()
-	upstream, err := network.NewPeer(network.PeerConf{Address: "127.0.0.1:7001", TLS: network.TLSConfig{
-		Mode: network.TLSModeMTLS, CertPath: h.orchestratorTLSCert(0), KeyPath: h.orchestratorTLSKey(0),
-		CACertPaths: []string{h.peerMSPTLSCA(0)}, ServerName: "127.0.0.1",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = upstream.Close() })
+	upstream := h.queryServiceClient(t)
 	certificate, err := tls.LoadX509KeyPair(h.orchestratorTLSCert(0), h.orchestratorTLSKey(0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootPEM, err := os.ReadFile(h.peerTLSCA(0))
-	if err != nil {
-		t.Fatal(err)
-	}
 	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(rootPEM) {
-		t.Fatal("load proxy client TLS CA")
+	for org := range 2 {
+		rootPEM, err := os.ReadFile(h.peerTLSCA(org))
+		if err != nil || !roots.AppendCertsFromPEM(rootPEM) {
+			t.Fatalf("load org%d proxy client TLS CA: %v", org, err)
+		}
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -274,7 +387,7 @@ func (h *e2eHarness) startDeferredFinality(t *testing.T, configPath string) *def
 	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
 		MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert,
 	})))
-	proxy := &deferredFinalityService{upstream: committerpb.NewQueryServiceClient(upstream.Connection()), queries: make(map[string]int)}
+	proxy := &deferredFinalityService{upstream: upstream, queries: make(map[string]int)}
 	committerpb.RegisterQueryServiceServer(server, proxy)
 	committerpb.RegisterNotifierServer(server, proxy)
 	go func() { _ = server.Serve(listener) }()

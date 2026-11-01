@@ -11,7 +11,7 @@ runbook.
 
 ```text
 architecture.md   execution path, helper semantics, remote endorsement, finality
-lifecycle.md      package/install/approve/commit/query behavior
+lifecycle.md      folder install/approve/commit/query behavior
 resolver.md       CCAAS and remote orchestrator discovery API
 ```
 

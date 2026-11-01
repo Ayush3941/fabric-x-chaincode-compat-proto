@@ -9,7 +9,7 @@ Fabric CCAAS shim protocol.
 
 The module also includes the unchanged Fabric Samples Asset Transfer Basic
 contract. Follow the [root README workflow](../README.md#optional-fabric-samples-asset-transfer)
-for its full package-to-block demo and [source notes](asset_transfer/README.md)
+for its full install-to-block demo and [source notes](asset_transfer/README.md)
 for the upstream revision and API limitations.
 
 ## Build
@@ -24,13 +24,13 @@ go build -o bin/asset-transfer-chaincode ./cmd/asset-transfer-server
 Org0:
 
 ```bash
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:9999
+./bin/sample-chaincode -ccid sample -address 127.0.0.1:9999
 ```
 
 Org1:
 
 ```bash
-./bin/sample-chaincode -ccid '0:sample' -address 127.0.0.1:10000
+./bin/sample-chaincode -ccid sample -address 127.0.0.1:10000
 ```
 
 TLS is disabled for the sample CCAAS endpoints. The resolver returns `tls_mode:
@@ -52,9 +52,9 @@ compat-v3 key value delete_key
 and writes, delete, composite keys, creator/MSP extraction, signed proposal,
 binding, timestamp, transient data, decorations, string args, and named events.
 
-## Package Inputs
+## Install Inputs
 
-CCAAS package inputs live under `cc_go/`:
+CCAAS metadata directories live under `cc_go/`:
 
 ```text
 cc_go/org0_sample/   connection metadata for org0 at 127.0.0.1:9999
@@ -64,9 +64,11 @@ cc_go/org0_asset_transfer/   asset-transfer runtime at 127.0.0.1:10001
 cc_go/org1_asset_transfer/   asset-transfer runtime at 127.0.0.1:10002
 ```
 
-The lifecycle package command builds a Fabric-style external chaincode package
-from one of these directories:
+Install one of these directories directly into its Orchestrator:
 
 ```bash
-../compatibility_service/bin/orchestrator lifecycle package --path ./cc_go/org0_sample --label org0_sample_1 --output ./cc_package/org0_sample/org0_sample.tgz
+../compatibility_service/bin/orchestrator lifecycle install -c ../compatibility_service/sampleconfig/admin-org0.yaml --host 127.0.0.1:9102 --path ./cc_go/org0_sample --label org0_sample_1
 ```
+
+The CLI builds the package in memory. It creates no archive file and leaves the
+metadata directory unchanged.

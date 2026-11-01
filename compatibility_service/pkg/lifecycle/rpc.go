@@ -415,26 +415,80 @@ func (s *Server) Commit(ctx context.Context, req *SignedRequest) (*CommitRespons
 		return nil, status.Errorf(codes.Internal, "commit lifecycle ledger transaction: %s", err)
 	}
 
-	committed, err := s.applyLedgerDefinition(ctx, payload.Definition, false)
+	var committed CommittedDefinition
+	if finalizer, ok := s.ledgerCommitter.(LedgerFinalizer); ok {
+		committed, err = finalizer.FinalizeLifecycleDefinition(ctx, payload.Definition, false)
+	} else {
+		committed, err = s.ReconcileDefinition(ctx, payload.Definition, false, &DefinitionPropagation{})
+	}
 	if err != nil {
 		return nil, err
-	}
-	remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: payload.Definition})
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "resolve remote lifecycle peers: %s", err)
-	}
-	internal, err := SignInternalRequest(s.signer, s.channelID, CommitRequest{Definition: payload.Definition})
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	for _, remote := range remotes {
-		if _, err := remote.Commit(ctx, internal); err != nil {
-			return nil, status.Errorf(codes.Internal, "remote commit %s: %s", remote.MSPID(), err)
-		}
 	}
 	s.logger.Infof("lifecycle commit name=%s version=%s sequence=%d caller_msp=%s local_msp=%s propagated=%t",
 		payload.Definition.Name, payload.Definition.Version, payload.Definition.Sequence, callerMSP, s.mspID, true)
 	return &CommitResponse{Definition: committed, Approvals: approvals, Ledger: ledger}, nil
+}
+
+// DefinitionPropagation retains only organizations whose mirror update has not
+// succeeded. It belongs to pending work and is discarded after reconciliation.
+type DefinitionPropagation struct {
+	Resolved      bool
+	Organizations []string
+}
+
+// ReconcileDefinition is shared by the active lifecycle request and lazy
+// recovery. Every local/remote update is verified against committed ledger state.
+// Callers serialize access to progress; successful organizations are not retried.
+func (s *Server) ReconcileDefinition(ctx context.Context, def ChaincodeDefinition, initialized bool, progress *DefinitionPropagation) (CommittedDefinition, error) {
+	committed, err := s.applyLedgerDefinition(ctx, def, initialized)
+	if err != nil {
+		return CommittedDefinition{}, err
+	}
+	if progress.Resolved && len(progress.Organizations) == 0 {
+		return committed, nil
+	}
+	remotes, err := s.remotePeers(ctx, RemotePeerRequest{RequesterMSP: s.mspID, Definition: def})
+	if err != nil {
+		return committed, status.Errorf(codes.Unavailable, "resolve remote lifecycle peers: %v", err)
+	}
+	byMSP := make(map[string]RemotePeer, len(remotes))
+	for _, remote := range remotes {
+		if _, seen := byMSP[remote.MSPID()]; !seen && !progress.Resolved {
+			progress.Organizations = append(progress.Organizations, remote.MSPID())
+		}
+		byMSP[remote.MSPID()] = remote
+	}
+	progress.Resolved = true
+	if len(progress.Organizations) == 0 {
+		return committed, nil
+	}
+	var payload any = CommitRequest{Definition: def}
+	if initialized {
+		payload = MarkInitializedRequest{Definition: def}
+	}
+	internal, err := SignInternalRequest(s.signer, s.channelID, payload)
+	if err != nil {
+		return committed, status.Error(codes.Internal, err.Error())
+	}
+	for len(progress.Organizations) > 0 {
+		mspID := progress.Organizations[0]
+		remote := byMSP[mspID]
+		if remote == nil {
+			return committed, status.Errorf(codes.Unavailable, "pending lifecycle organization %s is unavailable", mspID)
+		}
+		if initialized {
+			_, err = remote.MarkInitialized(ctx, internal)
+		} else {
+			_, err = remote.Commit(ctx, internal)
+		}
+		if err != nil {
+			return committed, status.Errorf(codes.Unavailable, "remote lifecycle update %s: %v", mspID, err)
+		}
+		progress.Organizations[0] = ""
+		progress.Organizations = progress.Organizations[1:]
+	}
+	progress.Organizations = nil
+	return committed, nil
 }
 
 // MarkInitialized marks this process' committed lifecycle definition initialized
@@ -516,6 +570,9 @@ func (s *Server) verifyAndUnmarshal(ctx context.Context, req *SignedRequest, pay
 	if err != nil {
 		return "", err
 	}
+	if s.store == nil || s.store.channelID != s.channelID {
+		return "", status.Error(codes.Internal, "lifecycle store channel does not match the server")
+	}
 	if err := json.Unmarshal(req.Payload, payload); err != nil {
 		return "", status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -532,7 +589,7 @@ func (s *Server) applyLedgerDefinition(ctx context.Context, def ChaincodeDefinit
 	if err != nil {
 		return CommittedDefinition{}, status.Errorf(codes.Unavailable, "read lifecycle ledger: %v", err)
 	}
-	if !ok || ChaincodeDefinitionFromLedger(ledger) != def || ledger.CCID != DefinitionCCID(def) || (initialized && !ledger.Initialized) {
+	if !ok || ChaincodeDefinitionFromLedger(ledger) != def || ledger.ChannelID != s.channelID || (initialized && !ledger.Initialized) {
 		return CommittedDefinition{}, status.Error(codes.FailedPrecondition, "lifecycle update does not match committed ledger state")
 	}
 	committed, err := s.store.UpsertCommittedFromLedger(ctx, def, ledger.Initialized)

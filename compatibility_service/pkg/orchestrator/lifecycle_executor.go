@@ -5,6 +5,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"compatibility_service/pkg/helper"
 	"compatibility_service/pkg/lifecycle"
@@ -46,12 +47,18 @@ func (e *lifecycleExecutor) Execute(ctx context.Context, execCtx *helper.Executi
 			return endorsement.ExecutionResult{}, helper.ExecutionMetadata{}, err
 		}
 		if ok {
+			// The invocation selected a revision before entering the helper. Reject a
+			// concurrent local lifecycle switch rather than silently changing runtimes.
+			if sequence := string(execCtx.Decorations()["compat.chaincode_sequence"]); sequence != "" &&
+				(sequence != strconv.FormatInt(committed.Definition.Sequence, 10) || chaincodeVersion != committed.Definition.Version) {
+				return endorsement.ExecutionResult{}, helper.ExecutionMetadata{}, fmt.Errorf("chaincode definition changed before execution; retry the proposal")
+			}
 			conn, ok, err := e.resolveChaincodeConnection(ctx, committed.Definition)
 			if err != nil {
 				return endorsement.ExecutionResult{}, helper.ExecutionMetadata{}, err
 			}
 			if !ok {
-				_, pkg, legacyOK, legacyErr := e.store.ResolveCommittedPackage(ctx, committed.Definition.Name, committed.Definition.Version, e.localMSPID)
+				_, pkg, legacyOK, legacyErr := e.store.ResolveCommittedPackage(ctx, committed.Definition.Name, e.localMSPID)
 				if legacyErr != nil {
 					if e.fallbackConnector == nil {
 						return endorsement.ExecutionResult{}, helper.ExecutionMetadata{}, legacyErr
@@ -101,10 +108,10 @@ func (e *lifecycleExecutor) Execute(ctx context.Context, execCtx *helper.Executi
 }
 
 func (e *lifecycleExecutor) resolveCommittedDefinition(ctx context.Context, name, version string) (lifecycle.CommittedDefinition, bool, error) {
-	if name != "" && version != "" {
-		return e.store.GetCommitted(ctx, name, version)
+	if name != "" {
+		return e.store.GetCommitted(ctx, name)
 	}
-	definitions, err := e.store.ListCommitted(ctx, name, version)
+	definitions, err := e.store.ListCommitted(ctx, name, "")
 	if err != nil {
 		return lifecycle.CommittedDefinition{}, false, err
 	}
@@ -112,7 +119,7 @@ func (e *lifecycleExecutor) resolveCommittedDefinition(ctx context.Context, name
 		return lifecycle.CommittedDefinition{}, false, nil
 	}
 	if len(definitions) > 1 {
-		return lifecycle.CommittedDefinition{}, false, fmt.Errorf("%d committed definitions are active; chaincode name and version are required",
+		return lifecycle.CommittedDefinition{}, false, fmt.Errorf("%d committed definitions are active; chaincode name is required",
 			len(definitions))
 	}
 	return definitions[0], true, nil
@@ -127,10 +134,25 @@ func (e *lifecycleExecutor) resolveChaincodeConnection(ctx context.Context, def 
 		}
 		return cached, ok, err
 	}
+	// An installed, approved package is authoritative for this organization's
+	// active revision. Discovery remains available for instances without that
+	// instance-local approval, including instances hydrated from the ledger.
+	approval, approved, err := e.store.GetApproval(ctx, def, e.localMSPID)
+	if err != nil {
+		return lifecycle.ResolvedChaincodeConnection{}, false, err
+	}
+	if approved && lifecycleDefinitionsMatch(approval.Definition, def) {
+		conn, err := e.store.PutResolvedConnection(ctx, lifecycle.ResolvedChaincodeConnection{
+			MSPID: e.localMSPID, Name: def.Name, Version: def.Version, Sequence: def.Sequence,
+			Address: approval.PackageAddress, PackageID: approval.PackageID, TLSMode: "none",
+		})
+		return conn, err == nil, err
+	}
 	if e.resolver == nil {
 		return lifecycle.ResolvedChaincodeConnection{}, false, nil
 	}
 	resolved, ok, err := e.resolver.Resolve(ctx, chaincodeResolverRequest{
+		ChannelID:  e.store.ChannelID(),
 		MSPID:      e.localMSPID,
 		Definition: def,
 	})
@@ -150,4 +172,21 @@ func lifecycleIdentityFromExecution(execCtx *helper.ExecutionContext) (string, s
 	}
 	decorations := execCtx.Decorations()
 	return string(decorations["compat.chaincode_name"]), string(decorations["compat.chaincode_version"])
+}
+
+// The client names the logical chaincode. Its proposal's version label cannot
+// select a superseded revision. Original signed proposal bytes stay untouched.
+func (s *Service) selectLifecycleDefinition(ctx context.Context, req InvocationRequest) (InvocationRequest, error) {
+	if s.lifecycle == nil || req.ChaincodeName == "" {
+		return req, nil
+	}
+	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName)
+	if err != nil {
+		return req, err
+	}
+	if ok {
+		req.definition = &committed
+		req.ChaincodeVersion = committed.Definition.Version
+	}
+	return req, nil
 }

@@ -23,6 +23,7 @@ Request:
 ```json
 {
   "operation": "CC_resolution",
+  "channel_id": "channelqc4",
   "msp_id": "org-0",
   "name": "sample",
   "version": "1.0",
@@ -43,6 +44,12 @@ Response:
 ```
 
 The current shim connector supports `tls_mode: none` for CCAAS endpoints.
+
+Version and sequence in this request come from the active committed definition,
+not from a client-selected historical version. Static entries may set
+`channel-id` to limit the mapping to one channel. Caches are scoped by channel,
+organization, name, and sequence. An installed package approved for the active
+sequence takes precedence over resolver lookup.
 
 ## Remote Orchestrator Resolution
 

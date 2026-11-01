@@ -20,12 +20,154 @@ import (
 	"compatibility_service/pkg/orchestrator"
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	"github.com/hyperledger/fabric-x-common/api/committerpb"
 	"github.com/hyperledger/fabric-x-common/protoutil"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestLifecycleFinalityRecoveryWithPendingOnlyStore(t *testing.T) {
+	h := newHarness(t, harnessOptions{name: "lifecycle-finality-recovery", requestWait: "45s", finality: "3s", deferFinality: true})
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
+	defer cancel()
+	name := fmt.Sprintf("recovery_init_%d", time.Now().UnixNano())
+	def := lifecycle.ChaincodeDefinition{Name: name, Version: "1.0", Sequence: 1, InitRequired: true}
+	h.approveDefinition(t, ctx, def)
+	command := exec.CommandContext(ctx, "./bin/orchestrator", "lifecycle", "commit", "-c", "sampleconfig/admin-org0.yaml",
+		"--host", fmt.Sprintf("127.0.0.1:%d", h.ports.org0Orch), "-n", name, "-v", "1.0", "--sequence", "1", "--init-required")
+	command.Dir = h.compatDir
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "finality") {
+		t.Fatalf("expected deliberately lost definition finality: %s %v", output, err)
+	}
+	query := h.finalityProxy.upstream
+	waitForMarker := func(initialized bool) lifecycle.LedgerDefinition {
+		t.Helper()
+		for ctx.Err() == nil {
+			rows, err := query.GetRows(ctx, &committerpb.Query{Namespaces: []*committerpb.QueryNamespace{{NsId: lifecycle.DefaultLedgerNamespace,
+				Keys: [][]byte{[]byte(lifecycle.LedgerKey(channelID, name))}}}})
+			if err == nil {
+				for _, ns := range rows.Namespaces {
+					for _, row := range ns.Rows {
+						value, err := lifecycle.UnmarshalLedgerDefinition(row.Value)
+						if err == nil && value.Name == name && value.Initialized == initialized {
+							return value
+						}
+					}
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatal("lifecycle marker did not reach committed state")
+		return lifecycle.LedgerDefinition{}
+	}
+	waitForMarker(false)
+	h.finalityProxy.visible.Store(true)
+	trigger := func(label string) orchestrator.InvocationResponse {
+		t.Helper()
+		proposal, _ := h.newSignedProposal(t, "compatv2", uniqueKey(t, label), label, uniqueKey(t, label+"-delete"))
+		result, err := h.invokeSigned(ctx, proposal)
+		if err != nil || !result.Submitted || !result.FinalityPending || result.IdempotentReplay {
+			t.Fatalf("maintenance changed the new submission's response: %+v %v", result, err)
+		}
+		return result
+	}
+	waitForMirrors := func(initialized bool) {
+		t.Helper()
+		for org, port := range []int{h.ports.org0Orch, h.ports.org1Orch} {
+			for deadline := time.Now().Add(8 * time.Second); ; {
+				out := runInitCommand(t, ctx, h, "./bin/orchestrator", "lifecycle", "querycommitted", "-c", fmt.Sprintf("sampleconfig/admin-org%d.yaml", org),
+					"--host", fmt.Sprintf("127.0.0.1:%d", port), "-n", name)
+				if strings.Contains(out, fmt.Sprintf("initialized=%t", initialized)) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("org%d mirror was not reconciled: %s", org, out)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}
+	firstTrigger := trigger("recover-definition")
+	waitForMirrors(false)
+	key := uniqueKey(t, "init-recovery")
+	response, err := h.processSigned(ctx, 0, orchestrator.GRPCOperationInvoke, initSignedProposal(t, h, name, true, "initialize", key, "seed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initResult orchestrator.InvocationResponse
+	if err := json.Unmarshal(response.Response.Payload, &initResult); err != nil || !initResult.Submitted || !initResult.FinalityPending {
+		t.Fatalf("expected pending application Init: %+v %v", initResult, err)
+	}
+	initStatus := h.waitForLedgerStatus(t, ctx, initResult.TxID)
+	secondTrigger := trigger("recover-init")
+	waitForMarker(true)
+	thirdTrigger := trigger("recover-marker")
+	waitForMirrors(true)
+	if _, err := h.processSigned(ctx, 0, orchestrator.GRPCOperationInvoke, initSignedProposal(t, h, name, true, "initialize", key, "replacement")); err == nil {
+		t.Fatal("recovered marker allowed Init to run again")
+	}
+	logPath := filepath.Join(h.root, "runtime", "compatibility_service", "e2e", sanitize(t.Name())+"-orchestrator-org0.log")
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactions := map[string]string{"init": initResult.TxID}
+	for _, line := range strings.Split(string(log), "\n") {
+		if !strings.Contains(line, "preparing lifecycle definition") || !strings.Contains(line, "name="+name+" ") {
+			continue
+		}
+		kind := "definition"
+		if strings.Contains(line, "initialized=true") {
+			kind = "marker"
+		}
+		if transactions[kind] != "" {
+			t.Fatalf("recovery prepared another %s transaction", kind)
+		}
+		for _, field := range strings.Fields(line) {
+			if id, ok := strings.CutPrefix(field, "tx="); ok {
+				transactions[kind] = id
+			}
+		}
+	}
+	if len(transactions) != 3 || strings.Count(string(log), "tx="+initResult.TxID+" submitting endorsed Fabric-X transaction") != 1 {
+		t.Fatalf("missing lifecycle evidence or repeated Init: %+v", transactions)
+	}
+	dir := filepath.Join(h.root, "runtime", "compatibility_service", "pending-recovery")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := h.blockQueryConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close() //nolint:errcheck
+	blocks := committerpb.NewBlockQueryServiceClient(connection)
+	outcomes := map[string]*committerpb.TxStatus{"init": initStatus}
+	for kind, txID := range transactions {
+		outcomes[kind] = h.waitForLedgerStatus(t, ctx, txID)
+		block, err := blocks.GetBlockByTxID(ctx, &committerpb.TxID{TxId: txID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := proto.Marshal(block)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, kind+"-block.pb"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, _ := json.MarshalIndent(map[string]any{"definition": def, "outcomes": outcomes, "triggers": []orchestrator.InvocationResponse{firstTrigger, secondTrigger, thirdTrigger},
+		"definition_and_marker_notifications_withheld": true, "both_organizations_initialized": true, "init_executed_once": true, "no_uncertain_resubmission": true}, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "live-result.json"), append(report, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("lazy lifecycle recovery: definition block=%d, Init block=%d, marker block=%d; both org mirrors repaired without resubmission", outcomes["definition"].Ref.BlockNum, initStatus.Ref.BlockNum, outcomes["marker"].Ref.BlockNum)
+}
 
 func TestSignedInitDispatchAndSequentialLifecycle(t *testing.T) {
 	h := newHarness(t, harnessOptions{name: "signed-init", requestWait: "90s", finality: "25s"})
@@ -44,8 +186,9 @@ func TestSignedInitDispatchAndSequentialLifecycle(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(source, "connection.json"), []byte(connection), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		pkg, err := lifecycle.PackageExternalChaincode(lifecycle.PackageOptions{
-			SourceDir: source, OutputPath: filepath.Join(t.TempDir(), "chaincode.tgz"), Label: fmt.Sprintf("%s_org%d", name, org),
+		label := fmt.Sprintf("%s_org%d", name, org)
+		pkg, err := lifecycle.BuildExternalChaincodePackage(lifecycle.PackageOptions{
+			SourceDir: source, Label: label,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -53,7 +196,14 @@ func TestSignedInitDispatchAndSequentialLifecycle(t *testing.T) {
 		packageIDs[org] = pkg.PackageID
 		adminConfig := fmt.Sprintf("sampleconfig/admin-org%d.yaml", org)
 		host := fmt.Sprintf("127.0.0.1:%d", port)
-		runInitCommand(t, ctx, h, "./bin/orchestrator", "lifecycle", "install", "-c", adminConfig, "--host", host, pkg.Output)
+		installed := runInitCommand(t, ctx, h, "./bin/orchestrator", "lifecycle", "install", "-c", adminConfig, "--host", host, "--path", source, "--label", label)
+		if !strings.Contains(installed, "package_id="+pkg.PackageID) {
+			t.Fatalf("folder install returned an unexpected package id: %s", installed)
+		}
+		entries, err := os.ReadDir(source)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "connection.json" {
+			t.Fatalf("folder install modified its source: %v %v", entries, err)
+		}
 		runInitCommand(t, ctx, h, "./bin/orchestrator", "lifecycle", "approveformyorg", "-c", adminConfig, "--host", host,
 			"-n", name, "-v", "1.0", "--sequence", "1", "--package-id", pkg.PackageID, "--init-required")
 	}

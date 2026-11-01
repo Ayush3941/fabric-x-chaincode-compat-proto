@@ -12,9 +12,9 @@ Only the startup method changes from the upstream executable; the contract's
 business logic is unchanged.
 
 Follow the complete [asset-transfer workflow](../../README.md#optional-fabric-samples-asset-transfer)
-in the root README to build, start one runtime per organization, package,
-install, approve, commit, create an asset, transfer ownership, and inspect the
-committed Fabric-X block.
+in the root README to build, start one runtime per organization, install its
+connection metadata, approve, commit, create an asset, transfer ownership, and
+inspect the committed Fabric-X block.
 
 `InitLedger`, `CreateAsset`, `ReadAsset`, `UpdateAsset`, `DeleteAsset`,
 `AssetExists`, and `TransferAsset` use direct key operations supported by the

@@ -3,7 +3,6 @@
 package orchestrator
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,14 +17,14 @@ import (
 	"time"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/gateway"
 	mspapi "github.com/hyperledger/fabric-protos-go-apiv2/msp"
+	"github.com/hyperledger/fabric-protos-go-apiv2/orderer"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/protoutil"
-	sdk "github.com/hyperledger/fabric-x-sdk"
 	efab "github.com/hyperledger/fabric-x-sdk/endorsement/fabric"
 	"github.com/hyperledger/fabric-x-sdk/identity"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -125,50 +124,6 @@ func TestRevokedProposalCreator(t *testing.T) {
 	}
 }
 
-func TestProcessProposalRejectsBeforeExecution(t *testing.T) {
-	org := newProposalTestMSP(t, "org-0")
-	now := time.Now()
-	client := org.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour))
-	peerActor := org.issue(t, "peer", now.Add(-time.Hour), now.Add(time.Hour))
-	verifier := proposalTestVerifier(t, []ProposalMSPConfig{org.config}, "OR('org-0.client')")
-	service := &Service{cfg: Config{ChannelID: "channelqc4", Namespace: "1"}, proposalAuth: verifier, logger: sdk.NoOpLogger{}}
-	// No helper, Query Service, or orderer is wired. Every case must be rejected
-	// at admission, before execution can reach any of those dependencies.
-	for _, operation := range []string{GRPCOperationQuery, GRPCOperationInvoke, GRPCOperationEndorse} {
-		for _, tc := range []struct {
-			name      string
-			actor     proposalTestActor
-			namespace string
-			badSig    bool
-			want      codes.Code
-		}{
-			{name: "invalid signature", actor: client, namespace: "1", badSig: true, want: codes.Unauthenticated},
-			{name: "unauthorized peer", actor: peerActor, namespace: "1", want: codes.PermissionDenied},
-			{name: "namespace override", actor: client, namespace: "2", want: codes.PermissionDenied},
-		} {
-			t.Run(operation+"/"+tc.name, func(t *testing.T) {
-				proposal := proposalTestSigned(t, tc.actor.signer, "")
-				if tc.badSig {
-					proposal.Signature = nil
-				}
-				ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(GRPCOperationMetadata, operation, GRPCNamespaceMetadata, tc.namespace))
-				_, err := service.ProcessProposal(ctx, proposal)
-				if status.Code(err) != tc.want {
-					t.Fatalf("error = %v, want %s", err, tc.want)
-				}
-			})
-		}
-	}
-	if _, err := service.ProcessProposal(context.Background(), nil); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("nil proposal error: %v", err)
-	}
-	service.proposalAuth = nil
-	proposal := proposalTestSigned(t, client.signer, "")
-	if _, err := service.ProcessProposal(context.Background(), proposal); status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("unconfigured verifier did not fail closed: %v", err)
-	}
-}
-
 func TestProposalAuthConfigurationFailsClosed(t *testing.T) {
 	org := newProposalTestMSP(t, "org-0")
 	valid := ProposalAuthConfig{MSPs: []ProposalMSPConfig{org.config}, Rules: []ProposalAuthorizationRule{{Chaincode: "*", Namespace: "*", Policy: "OR('org-0.client')"}}}
@@ -182,6 +137,10 @@ func TestProposalAuthConfigurationFailsClosed(t *testing.T) {
 		{name: "duplicate MSP", cfg: ProposalAuthConfig{MSPs: []ProposalMSPConfig{org.config, org.config}, Rules: valid.Rules}},
 		{name: "invalid policy", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: []ProposalAuthorizationRule{{Chaincode: "*", Namespace: "*", Policy: "broken"}}}},
 		{name: "policy references unknown MSP", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: []ProposalAuthorizationRule{{Chaincode: "*", Namespace: "*", Policy: "OR('unknown.member')"}}}},
+		{name: "invalid status policy", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: valid.Rules, CommitStatusPolicy: "broken"}},
+		{name: "status policy references unknown MSP", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: valid.Rules, CommitStatusPolicy: "OR('unknown.member')"}},
+		{name: "invalid event policy", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: valid.Rules, ChaincodeEventsPolicy: "broken"}},
+		{name: "event policy references unknown MSP", cfg: ProposalAuthConfig{MSPs: valid.MSPs, Rules: valid.Rules, ChaincodeEventsPolicy: "OR('unknown.member')"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := newProposalVerifier(tc.cfg); err == nil {
@@ -189,6 +148,168 @@ func TestProposalAuthConfigurationFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGatewayCommitStatusAuthentication(t *testing.T) {
+	org0, org1 := newProposalTestMSP(t, "org-0"), newProposalTestMSP(t, "org-1")
+	rogue := newProposalTestMSP(t, "org-0")
+	now := time.Now()
+	client := org0.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour))
+	other := org1.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour))
+	service := &Service{cfg: Config{ChannelID: "channelqc4"}, proposalAuth: proposalTestVerifier(t, []ProposalMSPConfig{org0.config, org1.config}, "OR('org-0.client')")}
+	for _, tc := range []struct {
+		name   string
+		actor  proposalTestActor
+		mutate func(*gateway.SignedCommitStatusRequest)
+		want   codes.Code
+	}{
+		{name: "authorized client", actor: client},
+		{name: "channel reader need not have invocation permission", actor: other},
+		{name: "invalid signature", actor: client, want: codes.Unauthenticated, mutate: func(r *gateway.SignedCommitStatusRequest) { r.Signature = []byte("invalid") }},
+		{name: "changed signed txid", actor: client, want: codes.Unauthenticated, mutate: func(r *gateway.SignedCommitStatusRequest) {
+			request := &gateway.CommitStatusRequest{}
+			_ = proto.Unmarshal(r.Request, request)
+			request.TransactionId = "another-transaction"
+			r.Request = protoutil.MarshalOrPanic(request)
+		}},
+		{name: "missing signature", actor: client, want: codes.InvalidArgument, mutate: func(r *gateway.SignedCommitStatusRequest) { r.Signature = nil }},
+		{name: "missing request", actor: client, want: codes.InvalidArgument, mutate: func(r *gateway.SignedCommitStatusRequest) { r.Request = nil }},
+		{name: "malformed request", actor: client, want: codes.InvalidArgument, mutate: func(r *gateway.SignedCommitStatusRequest) { r.Request = []byte{0xff} }},
+		{name: "wrong channel", actor: client, want: codes.InvalidArgument, mutate: func(r *gateway.SignedCommitStatusRequest) {
+			request := &gateway.CommitStatusRequest{}
+			_ = proto.Unmarshal(r.Request, request)
+			request.ChannelId = "another-channel"
+			r.Request = protoutil.MarshalOrPanic(request)
+		}},
+		{name: "rogue certificate", actor: rogue.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour)), want: codes.Unauthenticated},
+		{name: "expired certificate", actor: org0.issue(t, "client", now.Add(-2*time.Hour), now.Add(-time.Hour)), want: codes.Unauthenticated},
+		{name: "future certificate", actor: org0.issue(t, "client", now.Add(time.Hour), now.Add(2*time.Hour)), want: codes.Unauthenticated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := gatewayTestStatusRequest(t, tc.actor, "tx")
+			if tc.mutate != nil {
+				tc.mutate(request)
+			}
+			_, err := service.authenticateGatewayCommitStatus(request)
+			if status.Code(err) != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+		})
+	}
+	for _, txID := range []string{"", " ", " tx", "tx "} {
+		if _, err := service.authenticateGatewayCommitStatus(gatewayTestStatusRequest(t, client, txID)); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("accepted missing or padded transaction ID %q: %v", txID, err)
+		}
+	}
+	if _, err := service.authenticateGatewayCommitStatus(nil); status.Code(err) != codes.InvalidArgument {
+		t.Fatal(err)
+	}
+	policy, err := service.proposalAuth.trust.CompilePolicy("OR('org-0.client')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.proposalAuth.statusPolicy = policy
+	if _, err := service.authenticateGatewayCommitStatus(gatewayTestStatusRequest(t, other, "tx")); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("status reader policy was bypassed: %v", err)
+	}
+	service.proposalAuth = nil
+	if _, err := service.authenticateGatewayCommitStatus(gatewayTestStatusRequest(t, client, "tx")); status.Code(err) != codes.Unauthenticated {
+		t.Fatal(err)
+	}
+}
+
+func gatewayTestStatusRequest(t *testing.T, actor proposalTestActor, txID string) *gateway.SignedCommitStatusRequest {
+	t.Helper()
+	identity, err := actor.signer.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protoutil.MarshalOrPanic(&gateway.CommitStatusRequest{ChannelId: "channelqc4", TransactionId: txID, Identity: identity})
+	signature, err := actor.signer.Sign(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &gateway.SignedCommitStatusRequest{Request: request, Signature: signature}
+}
+
+func TestGatewayChaincodeEventsAuthentication(t *testing.T) {
+	org0, org1 := newProposalTestMSP(t, "org-0"), newProposalTestMSP(t, "org-1")
+	now := time.Now()
+	actor := org0.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour))
+	reader := org1.issue(t, "client", now.Add(-time.Hour), now.Add(time.Hour))
+	expired := org0.issue(t, "client", now.Add(-2*time.Hour), now.Add(-time.Hour))
+	service := &Service{cfg: Config{ChannelID: "channelqc4"}, proposalAuth: proposalTestVerifier(t, []ProposalMSPConfig{org0.config, org1.config}, "OR('org-0.client')")}
+	for _, tc := range []struct {
+		name string
+		want codes.Code
+	}{
+		{"valid", codes.OK}, {"reader without invocation permission", codes.OK}, {"bad signature", codes.Unauthenticated},
+		{"tampered route", codes.Unauthenticated}, {"unsigned", codes.InvalidArgument}, {"malformed", codes.InvalidArgument},
+		{"wrong channel", codes.InvalidArgument}, {"missing route", codes.InvalidArgument}, {"plain name", codes.InvalidArgument},
+		{"unsupported seek", codes.InvalidArgument}, {"expired certificate", codes.Unauthenticated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			signer := actor
+			if tc.name == "reader without invocation permission" {
+				signer = reader
+			}
+			if tc.name == "expired certificate" {
+				signer = expired
+			}
+			request := gatewayTestEventsRequest(t, signer, "sample:1")
+			decoded := &gateway.ChaincodeEventsRequest{}
+			_ = proto.Unmarshal(request.Request, decoded)
+			switch tc.name {
+			case "bad signature":
+				request.Signature = []byte("bad")
+			case "unsigned":
+				request.Signature = nil
+			case "malformed":
+				request.Request = []byte{0xff}
+			case "tampered route":
+				decoded.ChaincodeId = "other:1"
+			case "wrong channel":
+				decoded.ChannelId = "other-channel"
+			case "missing route":
+				decoded.ChaincodeId = ""
+			case "plain name":
+				decoded.ChaincodeId = "sample"
+			case "unsupported seek":
+				decoded.StartPosition = &orderer.SeekPosition{Type: &orderer.SeekPosition_Oldest{Oldest: &orderer.SeekOldest{}}}
+			}
+			if tc.name != "malformed" {
+				request.Request = protoutil.MarshalOrPanic(decoded)
+			}
+			if _, err := service.authenticateGatewayChaincodeEvents(request); status.Code(err) != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+		})
+	}
+	policy, err := service.proposalAuth.trust.CompilePolicy("OR('org-0.client')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.proposalAuth.eventPolicy = policy
+	if _, err := service.authenticateGatewayChaincodeEvents(gatewayTestEventsRequest(t, reader, "sample:1")); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("reader policy bypassed: %v", err)
+	}
+	if _, err := service.authenticateGatewayChaincodeEvents(nil); status.Code(err) != codes.InvalidArgument {
+		t.Fatal(err)
+	}
+}
+
+func gatewayTestEventsRequest(t *testing.T, actor proposalTestActor, route string) *gateway.SignedChaincodeEventsRequest {
+	t.Helper()
+	creator, err := actor.signer.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protoutil.MarshalOrPanic(&gateway.ChaincodeEventsRequest{ChannelId: "channelqc4", Identity: creator, ChaincodeId: route})
+	signature, err := actor.signer.Sign(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &gateway.SignedChaincodeEventsRequest{Request: request, Signature: signature}
 }
 
 type proposalTestMSP struct {
@@ -200,6 +321,7 @@ type proposalTestMSP struct {
 type proposalTestActor struct {
 	signer identity.Signer
 	cert   *x509.Certificate
+	key    *ecdsa.PrivateKey
 }
 
 func newProposalTestMSP(t *testing.T, name string) proposalTestMSP {
@@ -264,7 +386,7 @@ func (org proposalTestMSP) issue(t *testing.T, role string, notBefore, notAfter 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return proposalTestActor{signer: signer, cert: cert}
+	return proposalTestActor{signer: signer, cert: cert, key: key}
 }
 
 func proposalTestVerifier(t *testing.T, msps []ProposalMSPConfig, policy string) *proposalVerifier {

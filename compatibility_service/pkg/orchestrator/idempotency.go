@@ -27,7 +27,6 @@ type idempotencyRecord struct {
 	Digest        string
 	State         idempotencyState
 	HelperTxID    string
-	Endorsement   sdk.Endorsement
 	Response      InvocationResponse
 	Err           error
 	CreatedAt     time.Time
@@ -36,11 +35,12 @@ type idempotencyRecord struct {
 	done          chan struct{}
 	finalityCheck chan struct{}
 	afterCommit   func(context.Context) error
+	event         *ChaincodeEvent
 }
 
 type submittedInvocation struct {
 	Response    InvocationResponse
-	Endorsement sdk.Endorsement
+	Event       *ChaincodeEvent
 	AfterCommit func(context.Context) error
 }
 
@@ -53,6 +53,17 @@ func newIdempotencyStore() *idempotencyStore {
 	return &idempotencyStore{
 		records: make(map[string]*idempotencyRecord),
 	}
+}
+
+// existing checks retries without reserving a new ID for an invalid submission.
+func (s *idempotencyStore) existing(key, digest string) (*idempotencyRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	if ok && record.Digest != digest {
+		return nil, true, fmt.Errorf("idempotency conflict for key %s", key)
+	}
+	return record, ok, nil
 }
 
 // begin returns firstRequest=true only for the caller that created the record
@@ -88,7 +99,8 @@ func (s *idempotencyStore) begin(key, digest string) (*idempotencyRecord, bool, 
 }
 
 // wait shares execution until the record is either submitted or finished.
-// Submitted records are reconciled by an active request, never by a worker.
+// Terminal records remain accessible to callers already holding the pointer,
+// but are never retained in the store for historical replay.
 func (s *idempotencyStore) wait(ctx context.Context, record *idempotencyRecord) (InvocationResponse, error) {
 	if record == nil {
 		return InvocationResponse{}, errors.New("idempotency record is nil")
@@ -119,22 +131,26 @@ func (s *idempotencyStore) waitResult(record *idempotencyRecord, waitErr error) 
 	return out, waitErr
 }
 
-func (s *idempotencyStore) markExecuted(record *idempotencyRecord, helperTxID string, endorsement sdk.Endorsement) {
+func (s *idempotencyStore) markExecuted(record *idempotencyRecord, helperTxID string) {
 	if record == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record.HelperTxID = helperTxID
-	record.Endorsement = endorsement
 	record.State = idempotencyExecuted
 	record.UpdatedAt = time.Now()
 }
 
 func (s *idempotencyStore) markSubmitted(record *idempotencyRecord, response InvocationResponse, end sdk.Endorsement, afterCommit func(context.Context) error) {
+	s.markSubmission(record, response, end, afterCommit, nil)
+}
+
+func (s *idempotencyStore) markSubmission(record *idempotencyRecord, response InvocationResponse, end sdk.Endorsement, afterCommit func(context.Context) error, submitErr error) {
 	if record == nil {
 		return
 	}
+	event := eventFromEndorsement(end, response.TxID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if record.State == idempotencySubmitted || record.State == idempotencyCompleted || record.State == idempotencyFailed {
@@ -142,11 +158,29 @@ func (s *idempotencyStore) markSubmitted(record *idempotencyRecord, response Inv
 	}
 	record.Response = response
 	record.Response.FinalityPending = true
-	record.Endorsement = end
+	record.Err = submitErr
+	// Retain only the response/event needed by active callers, never the signed
+	// proposal (which can contain transient data), endorsements, or read/write set.
+	record.event = event
 	record.afterCommit = afterCommit
 	record.State = idempotencySubmitted
 	record.UpdatedAt = time.Now()
 	close(record.submitted)
+}
+
+// submissionOutcome distinguishes a successful ordering acknowledgment from an
+// uncertain delivery. A later final status also proves delivery, independently
+// of transaction validity or post-commit lifecycle bookkeeping errors.
+func (s *idempotencyStore) submissionOutcome(record *idempotencyRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if record.State == idempotencySubmitted {
+		return record.Response.Submitted, record.Err
+	}
+	if record.Response.Submitted {
+		return true, nil
+	}
+	return false, record.Err
 }
 
 // complete ends execution before submission. Once submitted, only an observed
@@ -169,6 +203,7 @@ func (s *idempotencyStore) complete(record *idempotencyRecord, response Invocati
 	}
 	record.UpdatedAt = time.Now()
 	close(record.done)
+	s.remove(record)
 }
 
 func (s *idempotencyStore) pending(record *idempotencyRecord) (submittedInvocation, bool) {
@@ -177,23 +212,29 @@ func (s *idempotencyStore) pending(record *idempotencyRecord) (submittedInvocati
 	if record == nil || record.State != idempotencySubmitted {
 		return submittedInvocation{}, false
 	}
-	return submittedInvocation{Response: record.Response, Endorsement: record.Endorsement, AfterCommit: record.afterCommit}, true
+	return submittedInvocation{Response: record.Response, Event: record.event, AfterCommit: record.afterCommit}, true
 }
 
-func (s *idempotencyStore) pendingRecords() []*idempotencyRecord {
+func (s *idempotencyStore) pendingRecords(limit int) []*idempotencyRecord {
+	return s.pendingRecordsBefore(limit, time.Time{})
+}
+
+func (s *idempotencyStore) pendingRecordsBefore(limit int, cutoff time.Time) []*idempotencyRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var pending []*idempotencyRecord
 	for _, record := range s.records {
-		if record.State == idempotencySubmitted {
+		if record.State == idempotencySubmitted && (cutoff.IsZero() || !record.UpdatedAt.After(cutoff)) {
 			pending = append(pending, record)
+			if limit > 0 && len(pending) == limit {
+				break
+			}
 		}
 	}
 	return pending
 }
 
-// Serialize request-driven status checks and initialization bookkeeping. The
-// channel is only a cancellable mutex; no goroutine runs when a request ends.
+// Serialize active finality waits and bounded lazy maintenance passes.
 func (r *idempotencyRecord) lockFinality(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -219,8 +260,8 @@ func (r *idempotencyRecord) tryLockFinality() bool {
 	}
 }
 
-// confirmFinality preserves a known ledger outcome even if post-commit work
-// (such as initialization bookkeeping) reports an error.
+// confirmFinality hands the known outcome to existing callers, then evicts it.
+// Unfinished lifecycle work is kept separately from this completed transaction.
 func (s *idempotencyStore) confirmFinality(record *idempotencyRecord, response InvocationResponse, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -231,5 +272,15 @@ func (s *idempotencyStore) confirmFinality(record *idempotencyRecord, response I
 	record.Response, record.Err = response, err
 	record.State = idempotencyCompleted
 	record.UpdatedAt = time.Now()
+	record.afterCommit, record.event = nil, nil
 	close(record.done)
+	s.remove(record)
+}
+
+// Caller holds s.mu. An old caller's deferred cleanup must not remove a newer
+// request that reused the same key after the original record was evicted.
+func (s *idempotencyStore) remove(record *idempotencyRecord) {
+	if s.records[record.Key] == record {
+		delete(s.records, record.Key)
+	}
 }

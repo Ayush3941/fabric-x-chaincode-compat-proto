@@ -30,10 +30,13 @@ func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lifecycle",
 		Short: "Manage compatibility-layer chaincode lifecycle",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to lifecycle client configuration file")
 	cmd.PersistentFlags().String("host", "", "Target orchestrator host:port")
-	cmd.AddCommand(newPackageCommand())
 	cmd.AddCommand(newInstallCommand())
 	cmd.AddCommand(newQueryInstalledCommand())
 	cmd.AddCommand(newApproveForMyOrgCommand())
@@ -43,39 +46,16 @@ func NewCommand() *cobra.Command {
 	return cmd
 }
 
-func newPackageCommand() *cobra.Command {
+func newInstallCommand() *cobra.Command {
 	var opts lifecycle.PackageOptions
 	cmd := &cobra.Command{
-		Use:   "package",
-		Short: "Package external chaincode connection metadata",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			info, err := lifecycle.PackageExternalChaincode(opts)
+		Use:   "install --path DIRECTORY",
+		Short: "Install external chaincode connection metadata from a local directory",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			pkg, err := lifecycle.BuildExternalChaincodePackage(opts)
 			if err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stdout, "label=%s\n", info.Label)
-			fmt.Fprintf(os.Stdout, "output=%s\n", info.Output)
-			fmt.Fprintf(os.Stdout, "package_id=%s\n", info.PackageID)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&opts.SourceDir, "path", "", "Directory containing connection.json and metadata.json")
-	cmd.Flags().StringVar(&opts.OutputPath, "output", "", "Output chaincode package path")
-	cmd.Flags().StringVar(&opts.Label, "label", "", "Package label; updates metadata.json before packaging")
-	cmd.MarkFlagRequired("path")   //nolint:errcheck
-	cmd.MarkFlagRequired("output") //nolint:errcheck
-	return cmd
-}
-
-func newInstallCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "install PACKAGE",
-		Short: "Install a packaged external chaincode into a running orchestrator",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			packageBytes, err := os.ReadFile(args[0])
-			if err != nil {
-				return fmt.Errorf("read package: %w", err)
+				return fmt.Errorf("build install package: %w", err)
 			}
 			client, closeClient, signer, err := lifecycleClient(cmd)
 			if err != nil {
@@ -83,7 +63,7 @@ func newInstallCommand() *cobra.Command {
 			}
 			defer closeClient()
 
-			req, err := client.SignRequest(signer, lifecycle.InstallRequest{Package: packageBytes})
+			req, err := client.SignRequest(signer, lifecycle.InstallRequest{Package: pkg.PackageTGZ})
 			if err != nil {
 				return err
 			}
@@ -91,10 +71,13 @@ func newInstallCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("install package: %w", err)
 			}
-			printPackage(os.Stdout, res.Package)
+			printPackage(cmd.OutOrStdout(), res.Package)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&opts.SourceDir, "path", "", "Local directory containing connection.json and metadata.json")
+	cmd.Flags().StringVar(&opts.Label, "label", "", "Override the package label without modifying metadata.json")
+	cmd.MarkFlagRequired("path") //nolint:errcheck
 	return cmd
 }
 

@@ -34,14 +34,17 @@ func (s *Service) validateInitState(ctx context.Context, req InvocationRequest, 
 		}
 		return nil, nil
 	}
-	if req.ChaincodeName == "" || req.ChaincodeVersion == "" {
+	if req.ChaincodeName == "" {
 		if req.IsInit {
-			return nil, fmt.Errorf("initialization requires a chaincode name and version")
+			return nil, fmt.Errorf("initialization requires a chaincode name")
 		}
 		return nil, nil
 	}
 
-	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName, req.ChaincodeVersion)
+	committed, ok, err := s.lifecycle.GetCommitted(ctx, req.ChaincodeName)
+	if req.definition != nil {
+		committed, ok, err = *req.definition, true, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -74,38 +77,13 @@ func (s *Service) markInitializedAfterCommit(ctx context.Context, def lifecycle.
 	if s == nil || s.lifecycle == nil {
 		return nil
 	}
-	ledger, err := s.MarkLifecycleInitialized(ctx, def)
-	if err != nil {
+	// MarkLifecycleInitialized registers the pending marker before using ctx.
+	// Thus an expired application caller cannot lose unfinished lifecycle work.
+	if _, err := s.MarkLifecycleInitialized(ctx, def); err != nil {
 		return fmt.Errorf("mark lifecycle initialized on ledger: %w", err)
 	}
-	s.logger.Infof("lifecycle initialized ledger marker committed tx=%s status=%s block=%d key=%s",
-		ledger.TxID, ledger.Status, ledger.BlockNum, ledger.Key)
-
-	committed, err := s.lifecycle.MarkInitialized(ctx, def, s.cfg.Identity.MspID)
-	if err != nil {
-		return fmt.Errorf("mark local lifecycle initialized: %w", err)
-	}
-	s.logger.Infof("lifecycle initialized locally name=%s version=%s sequence=%d initialized=%t",
-		def.Name, def.Version, def.Sequence, committed.Initialized)
-
-	req, err := lifecycle.SignInternalRequest(s.signer, s.cfg.ChannelID, lifecycle.MarkInitializedRequest{Definition: def})
-	if err != nil {
-		return fmt.Errorf("sign lifecycle initialized request: %w", err)
-	}
-	remotes, err := s.RemotePeers(ctx, lifecycle.RemotePeerRequest{
-		RequesterMSP: s.cfg.Identity.MspID,
-		Definition:   def,
-	})
-	if err != nil {
-		return fmt.Errorf("resolve remote lifecycle peers: %w", err)
-	}
-	for _, remote := range remotes {
-		res, err := remote.MarkInitialized(ctx, req)
-		if err != nil {
-			return err
-		}
-		s.logger.Infof("lifecycle initialized remote msp=%s name=%s version=%s sequence=%d initialized=%t",
-			remote.MSPID(), def.Name, def.Version, def.Sequence, res.Definition.Initialized)
+	if _, err := s.FinalizeLifecycleDefinition(ctx, def, true); err != nil {
+		return fmt.Errorf("reconcile lifecycle initialized mirrors: %w", err)
 	}
 	return nil
 }

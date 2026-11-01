@@ -19,7 +19,11 @@ import (
 
 	"compatibility_service/pkg/config"
 	"compatibility_service/pkg/orchestrator"
+	gwclient "github.com/hyperledger/fabric-gateway/pkg/client"
+	gwhash "github.com/hyperledger/fabric-gateway/pkg/hash"
+	gwidentity "github.com/hyperledger/fabric-gateway/pkg/identity"
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	mspapi "github.com/hyperledger/fabric-protos-go-apiv2/msp"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric-x-common/common/viperutil"
 	"github.com/hyperledger/fabric-x-common/protoutil"
@@ -27,6 +31,7 @@ import (
 	"github.com/hyperledger/fabric-x-sdk/network"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 // Config holds all configuration for the client.
@@ -63,18 +68,19 @@ func main() {
 		Long: `Client sends invocations to the orchestrator gRPC endpoint.
 
   query  — endorse only; prints the response payload (read-only)
+  evaluate — query using the official Fabric Gateway SDK
   invoke — runs the write path and prints the orchestrator result`,
 	}
 	cmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
 	cmd.PersistentFlags().String("namespace", "", "Fabric-X namespace to invoke")
 	cmd.PersistentFlags().StringP("name", "n", "", "Lifecycle chaincode name")
-	cmd.PersistentFlags().StringP("version", "v", "1.0", "Lifecycle chaincode version")
+	cmd.PersistentFlags().StringP("version", "v", "", "Optional proposal version label; execution uses the committed definition by name")
 	cmd.PersistentFlags().String("host", "", "Target orchestrator host:port")
 	cmd.MarkPersistentFlagRequired("config")
 	cmd.MarkPersistentFlagRequired("namespace")
 	cmd.MarkPersistentFlagRequired("name")
 
-	cmd.AddCommand(newQueryCmd(), newInvokeCmd())
+	cmd.AddCommand(newQueryCmd(), newInvokeCmd(), newEvaluateCmd())
 
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -113,6 +119,78 @@ func newQueryCmd() *cobra.Command {
 			return nil
 		},
 	}
+	return cmd
+}
+
+// Evaluate uses the same configuration and JSON input as Query, but sends the
+// standard Gateway RPC through the official SDK rather than ProcessProposal.
+func newEvaluateCmd() *cobra.Command {
+	var targetOrgs []string
+	cmd := &cobra.Command{
+		Use:   `evaluate '{"Function":"get","Args":["key"]}'`,
+		Short: "Evaluate using the Fabric Gateway SDK and print the raw result",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, txArgs, transient, err := prepare(cmd, args[0])
+			if err != nil {
+				return err
+			}
+			if len(txArgs) == 0 || len(txArgs[0]) == 0 {
+				return fmt.Errorf("function is required")
+			}
+			namespace, err := namespaceFromFlag(cmd)
+			if err != nil {
+				return err
+			}
+			name, _, err := chaincodeIdentity(cmd)
+			if err != nil {
+				return err
+			}
+			if version, _ := cmd.Flags().GetString("version"); version != "" {
+				return fmt.Errorf("evaluate selects the active definition by name; omit --version")
+			}
+			signer, err := identity.SignerFromMSP(cfg.Identity.MSPDir, cfg.Identity.MspID)
+			if err != nil {
+				return err
+			}
+			creator, err := signer.Serialize()
+			if err != nil {
+				return err
+			}
+			serialized := &mspapi.SerializedIdentity{}
+			if err := proto.Unmarshal(creator, serialized); err != nil {
+				return err
+			}
+			cert, err := gwidentity.CertificateFromPEM(serialized.IdBytes)
+			if err != nil {
+				return err
+			}
+			id, err := gwidentity.NewX509Identity(serialized.Mspid, cert)
+			if err != nil {
+				return err
+			}
+			connection, err := network.NewPeer(cfg.Orchestrator.ToPeerConf())
+			if err != nil {
+				return err
+			}
+			defer connection.Close() //nolint:errcheck
+			// The existing signer hashes its input internally. NONE passes the
+			// original bytes to it, producing the same SHA-256/ECDSA signature.
+			gateway, err := gwclient.Connect(id, gwclient.WithClientConnection(connection.Connection()), gwclient.WithHash(gwhash.NONE), gwclient.WithSign(signer.Sign))
+			if err != nil {
+				return err
+			}
+			defer gateway.Close() //nolint:errcheck
+			contract := gateway.GetNetwork(cfg.ChannelID).GetContract(name + ":" + namespace)
+			result, err := contract.EvaluateWithContext(cmd.Context(), string(txArgs[0]), gwclient.WithBytesArguments(txArgs[1:]...), gwclient.WithTransient(transient), gwclient.WithEndorsingOrganizations(targetOrgs...))
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(result)
+			return err
+		},
+	}
+	cmd.Flags().StringSliceVar(&targetOrgs, "target-orgs", nil, "Evaluate in one of these organizations (MSP IDs)")
 	return cmd
 }
 
@@ -361,8 +439,5 @@ func chaincodeIdentity(cmd *cobra.Command) (string, string, error) {
 		return "", "", fmt.Errorf("name is required")
 	}
 	version, _ := cmd.Flags().GetString("version")
-	if version == "" {
-		version = "1.0"
-	}
 	return name, version, nil
 }

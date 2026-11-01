@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 )
 
@@ -14,10 +15,7 @@ const (
 	// lifecycle records.
 	DefaultLedgerNamespace = "0"
 
-	ledgerKeyPrefix           = "_lifecycle/chaincodes/"
-	lifecycleIndexPrefix      = "_lifecycle/index/"
-	LifecycleHighWatermarkKey = lifecycleIndexPrefix + "high_watermark"
-	lifecycleLedgerSchema     = 1
+	lifecycleLedgerSchema     = 2
 	LifecycleEventCommit      = "commit"
 	LifecycleEventInitialized = "initialized"
 )
@@ -43,9 +41,15 @@ type LedgerBackend interface {
 	ReadLifecycleDefinition(context.Context, ChaincodeDefinition) (LedgerDefinition, bool, error)
 }
 
+// LedgerFinalizer allows a backend with pending recovery to own the small
+// amount of bookkeeping left after a lifecycle transaction commits.
+type LedgerFinalizer interface {
+	FinalizeLifecycleDefinition(context.Context, ChaincodeDefinition, bool) (CommittedDefinition, error)
+}
+
 // LedgerDefinition is the deterministic shared value stored in Fabric-X state.
 type LedgerDefinition struct {
-	CCID         string `json:"ccid"`
+	ChannelID    string `json:"channel_id"`
 	Name         string `json:"name"`
 	Version      string `json:"version"`
 	Sequence     int64  `json:"sequence"`
@@ -61,7 +65,7 @@ type LifecycleIndexEntry struct {
 	Number        uint64 `json:"number"`
 	EventType     string `json:"event_type"`
 	DefinitionKey string `json:"definition_key"`
-	CCID          string `json:"ccid"`
+	ChannelID     string `json:"channel_id"`
 	Name          string `json:"name"`
 	Version       string `json:"version"`
 	Sequence      int64  `json:"sequence"`
@@ -69,21 +73,32 @@ type LifecycleIndexEntry struct {
 	Initialized   bool   `json:"initialized"`
 }
 
-func DefinitionCCID(def ChaincodeDefinition) string {
-	return fmt.Sprintf("%s:%s", def.Name, def.Version)
+func channelKeyPrefix(channelID string) string {
+	return "_lifecycle/channels/" + url.PathEscape(channelID) + "/"
 }
 
-func LedgerKey(def ChaincodeDefinition) string {
-	return ledgerKeyPrefix + DefinitionCCID(def)
+// LedgerKey is stable across every revision of this chaincode on the channel.
+func LedgerKey(channelID, name string) string {
+	return channelKeyPrefix(channelID) + "chaincodes/" + url.PathEscape(name)
 }
 
-func LifecycleIndexEntryKey(number uint64) string {
-	return fmt.Sprintf("%s%020d", lifecycleIndexPrefix, number)
+func LifecycleHighWatermarkKey(channelID string) string {
+	return channelKeyPrefix(channelID) + "index/high_watermark"
 }
 
-func MarshalLedgerDefinition(def ChaincodeDefinition, initialized bool) ([]byte, error) {
+func LifecycleIndexEntryKey(channelID string, number uint64) string {
+	return fmt.Sprintf("%sindex/%020d", channelKeyPrefix(channelID), number)
+}
+
+func MarshalLedgerDefinition(channelID string, def ChaincodeDefinition, initialized bool) ([]byte, error) {
+	if channelID == "" {
+		return nil, fmt.Errorf("channel ID is required")
+	}
+	if err := validateDefinition(def); err != nil {
+		return nil, err
+	}
 	return json.Marshal(LedgerDefinition{
-		CCID:         DefinitionCCID(def),
+		ChannelID:    channelID,
 		Name:         def.Name,
 		Version:      def.Version,
 		Sequence:     def.Sequence,
@@ -97,8 +112,11 @@ func UnmarshalLedgerDefinition(data []byte) (LedgerDefinition, error) {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return LedgerDefinition{}, err
 	}
-	if value.CCID == "" {
-		value.CCID = fmt.Sprintf("%s:%s", value.Name, value.Version)
+	if value.ChannelID == "" {
+		return LedgerDefinition{}, fmt.Errorf("lifecycle record has no channel ID; legacy name:version records require redeployment")
+	}
+	if err := validateDefinition(ChaincodeDefinitionFromLedger(value)); err != nil {
+		return LedgerDefinition{}, err
 	}
 	return value, nil
 }
@@ -112,14 +130,13 @@ func ChaincodeDefinitionFromLedger(value LedgerDefinition) ChaincodeDefinition {
 	}
 }
 
-func NewLifecycleIndexEntry(number uint64, eventType string, def ChaincodeDefinition, initialized bool) LifecycleIndexEntry {
-	ccid := DefinitionCCID(def)
+func NewLifecycleIndexEntry(channelID string, number uint64, eventType string, def ChaincodeDefinition, initialized bool) LifecycleIndexEntry {
 	return LifecycleIndexEntry{
 		SchemaVersion: lifecycleLedgerSchema,
 		Number:        number,
 		EventType:     eventType,
-		DefinitionKey: LedgerKey(def),
-		CCID:          ccid,
+		DefinitionKey: LedgerKey(channelID, def.Name),
+		ChannelID:     channelID,
 		Name:          def.Name,
 		Version:       def.Version,
 		Sequence:      def.Sequence,
@@ -137,19 +154,9 @@ func UnmarshalLifecycleIndexEntry(data []byte) (LifecycleIndexEntry, error) {
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return LifecycleIndexEntry{}, err
 	}
-	if entry.SchemaVersion == 0 {
-		entry.SchemaVersion = lifecycleLedgerSchema
-	}
-	if entry.DefinitionKey == "" && entry.Name != "" && entry.Version != "" {
-		entry.DefinitionKey = LedgerKey(ChaincodeDefinitionFromLedger(LedgerDefinition{
-			Name:         entry.Name,
-			Version:      entry.Version,
-			Sequence:     entry.Sequence,
-			InitRequired: entry.InitRequired,
-		}))
-	}
-	if entry.CCID == "" && entry.Name != "" && entry.Version != "" {
-		entry.CCID = fmt.Sprintf("%s:%s", entry.Name, entry.Version)
+	if entry.SchemaVersion != lifecycleLedgerSchema || entry.ChannelID == "" || entry.Name == "" ||
+		entry.DefinitionKey != LedgerKey(entry.ChannelID, entry.Name) {
+		return LifecycleIndexEntry{}, fmt.Errorf("invalid channel-scoped lifecycle index entry")
 	}
 	return entry, nil
 }

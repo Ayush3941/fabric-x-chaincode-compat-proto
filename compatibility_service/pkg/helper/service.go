@@ -42,6 +42,7 @@ type Service struct {
 	stateReader StateReader
 	executors   map[string]Executor
 	builder     endorsement.Builder
+	signer      sdk.Signer
 	logger      sdk.Logger
 }
 
@@ -416,6 +417,7 @@ func NewWithSigner(cfg ServiceConfig, signer sdk.Signer, executors map[string]Ex
 		stateReader: NewQueryServiceStateReader(committerpb.NewQueryServiceClient(queryPeer.Connection())),
 		executors:   executors,
 		builder:     efabx.NewEndorsementBuilder(signer),
+		signer:      signer,
 		logger:      logger,
 	}
 
@@ -545,6 +547,9 @@ func (s *Service) ProcessProposal(ctx context.Context, prop *peer.SignedProposal
 	if err != nil {
 		s.logger.Warnf("tx=%s endorsement build failed: %s", inv.TxID, err)
 		return nil, status.Error(codes.Internal, fmt.Sprintf("endorsement: %s", err.Error()))
+	}
+	if err := bindChaincodeMetadata(s.signer, end, original, inv.Namespace, proposal.Decorations); err != nil {
+		return nil, status.Error(codes.Internal, fmt.Sprintf("bind chaincode metadata: %v", err))
 	}
 
 	payload := "empty"
